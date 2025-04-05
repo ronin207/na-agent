@@ -2,6 +2,11 @@
 .DS_Store
 Thumbs.db
 
+# Ignore the data folder(s) to prevent accidental commits
+/data/
+# If your application uses another data folder (e.g. for PDFs or other assets), add it below
+/mattermost/data/
+
 
 # Python files and virtual environment artifacts
 __pycache__/
