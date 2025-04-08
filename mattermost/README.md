@@ -53,12 +53,12 @@ This bot allows users to query lecture notes using a RAG (Retrieval-Augmented Ge
 In any Mattermost channel, users can interact with the bot using:
 
 ```
-/lecture <your question>
+@knowledge-agent <your question>
 ```
 
 For example:
 ```
-/lecture What is the definition of a vector norm?
+@knowledge-agent What is the definition of a vector norm?
 ```
 
 The bot will respond with:
