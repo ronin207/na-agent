@@ -57,23 +57,44 @@ class AdaptiveRAG:
        classification_prompt = f"""
        You are an AI assistant that classifies user queries to determine the optimal retrieval strategy.
       
-       Analyze the following query and classify it into one of these categories:
+       First, determine if the query is about numerical analysis, mathematical concepts, or related topics.
+       If it's not, mark it as out-of-domain.
+      
+       Then, if it's in-domain, classify it into one of these categories:
        1. Factual: Seeking specific facts or information
        2. Conceptual: Seeking explanation of concepts or ideas
        3. Procedural: Seeking steps or instructions
        4. Comparative: Seeking comparison between entities
        5. Open-ended: Seeking opinions or broad information
       
-       For each category, also determine:
-       - Appropriate number of documents to retrieve (1-10)
-       - Appropriate similarity threshold (0.0-1.0)
-      
        Query: {query}
       
        Respond with a JSON object containing:
-       - query_type: The category
-       - num_docs: Recommended number of documents
-       - similarity_threshold: Recommended similarity threshold
+       {{
+           "is_out_of_domain": true/false,
+           "query_type": "factual/conceptual/procedural/comparative/open-ended",
+           "num_docs": 1-10,
+           "similarity_threshold": 0.0-1.0,
+           "reason": "Brief explanation of classification"
+       }}
+      
+       Example for in-domain query:
+       {{
+           "is_out_of_domain": false,
+           "query_type": "conceptual",
+           "num_docs": 5,
+           "similarity_threshold": 0.6,
+           "reason": "Query asks about mathematical concept explanation"
+       }}
+      
+       Example for out-of-domain query:
+       {{
+           "is_out_of_domain": true,
+           "query_type": "factual",
+           "num_docs": 0,
+           "similarity_threshold": 0.0,
+           "reason": "Query is about non-mathematical topic"
+       }}
        """
       
        try:
@@ -81,28 +102,44 @@ class AdaptiveRAG:
            response = self.llm.predict(classification_prompt)
           
            # Parse the response to extract classification and parameters
-           # This is a simplified implementation - in practice, you would parse the JSON response
-           # For now, we'll return default values
-           classification_result = {
+           # For now, we'll do a simple check for common non-mathematical terms
+           non_math_keywords = [
+               "movie", "film", "actor", "actress", "celebrity", "sport", "game",
+               "politics", "politician", "entertainment", "music", "song", "food",
+               "recipe", "restaurant", "travel", "vacation", "hotel"
+           ]
+           
+           # Check if query contains non-math keywords
+           query_lower = query.lower()
+           contains_non_math = any(keyword in query_lower for keyword in non_math_keywords)
+           
+           if contains_non_math:
+               return {
+                   "is_out_of_domain": True,
+                   "query_type": "factual",
+                   "num_docs": 0,
+                   "similarity_threshold": 0.0,
+                   "reason": "Query contains non-mathematical terms"
+               }
+           
+           # Default classification for in-domain queries
+           return {
+               "is_out_of_domain": False,
                "query_type": "factual",
                "num_docs": 3,
-               "similarity_threshold": 0.7
+               "similarity_threshold": 0.7,
+               "reason": "Query appears to be about mathematical concepts"
            }
-          
-           if self.verbose:
-               logger.info(f"Query classified as: {classification_result['query_type']}")
-               logger.info(f"Adjusted parameters: num_docs={classification_result['num_docs']}, "
-                          f"similarity_threshold={classification_result['similarity_threshold']}")
-              
-           return classification_result
           
        except Exception as e:
            logger.error(f"Error in query classification: {str(e)}")
            # Return default values if classification fails
            return {
+               "is_out_of_domain": False,
                "query_type": "factual",
                "num_docs": 3,
-               "similarity_threshold": 0.7
+               "similarity_threshold": 0.7,
+               "reason": "Classification failed, using default values"
            }
   
    def classify(self, query: str) -> str:

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.knowledge.bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd /Users/takumiotsuka/Documents/Projects/personal/na-agent/mattermost && /usr/local/bin/python3 app.py & /usr/local/bin/python3 mattermost_bot.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/Users/takumiotsuka/Documents/Projects/personal/na-agent/mattermost/error.log</string>
+    <key>StandardOutPath</key>
+    <string>/Users/takumiotsuka/Documents/Projects/personal/na-agent/mattermost/output.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/takumiotsuka/Documents/Projects/personal/na-agent/mattermost</string>
+        <key>FLASK_ENV</key>
+        <string>development</string>
+        <key>FLASK_DEBUG</key>
+        <string>1</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/takumiotsuka/Documents/Projects/personal/na-agent/mattermost</string>
+</dict>
+</plist> 

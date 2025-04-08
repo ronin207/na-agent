@@ -78,8 +78,7 @@ class WebSearchAgent:
        client = openai.OpenAI(api_key=self.api_keys.get('openai'))
       
        try:
-           # Call the OpenAI API with web search enabled - only use required parameters
-           # No temperature or response_format parameters as they're not supported
+           # Call the OpenAI API with web search enabled
            response = client.chat.completions.create(
                model="gpt-4o-mini-search-preview",
                messages=[
@@ -98,56 +97,42 @@ class WebSearchAgent:
            urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', content)
            logger.debug(f"Extracted {len(urls)} URLs from response content")
           
-
-
+           # Clean up URLs - remove search.openai.com and encoded query parameters
+           cleaned_urls = []
+           for url in urls:
+               # Skip search.openai.com URLs
+               if 'search.openai.com' in url:
+                   continue
+               # Remove query parameters
+               base_url = url.split('?')[0]
+               if base_url not in cleaned_urls:
+                   cleaned_urls.append(base_url)
+          
            # Format the search results
            formatted_results = []
           
-           # Add a header result with the search query and first URL if available
-           formatted_results.append({
-               "title": f"Web Search Results for: {query}",
-               "link": urls[0] if urls else "https://search.example.com",
-               "snippet": f"The following information was retrieved from the web in response to your query: '{query}'"
-           })
-          
-           # Add the main result with the content from OpenAI and second URL if available
+           # Add the main result with the content from OpenAI
            formatted_results.append({
                "title": "Web Search Result",
-               "link": urls[1] if len(urls) > 1 else (urls[0] if urls else "https://search.openai.com"),
+               "link": cleaned_urls[0] if cleaned_urls else "https://example.com",
                "snippet": content
            })
           
            # Add additional results with actual URLs if available
-           url_index = 2
-           while len(formatted_results) < self.max_results and url_index < len(urls):
+           for i, url in enumerate(cleaned_urls[1:], 1):
+               if len(formatted_results) >= self.max_results:
+                   break
+                  
+               # Extract domain name for the title
+               domain = url.split('/')[2] if len(url.split('/')) > 2 else url
                formatted_results.append({
-                   "title": f"Additional Information for: {query}",
-                   "link": urls[url_index],
-                   "snippet": f"Additional web search result from {urls[url_index]}"
-               })
-               url_index += 1
-              
-           # Add placeholder results only if needed to meet max_results and we've used all available URLs
-           while len(formatted_results) < self.max_results:
-               formatted_results.append({
-                   "title": f"Additional Source {url_index-1} for: {query}",
-                   "link": urls[url_index] if url_index < len(urls) else "https://search.openai.com/search?q=" + query.replace(' ', '+'),
-                   "snippet": f"This is an additional source found during web search for '{query}'."
-               })
-               url_index += 1
-          
-           # If we still need more results to meet max_results, add generic entries
-           while len(formatted_results) < self.max_results:
-               formatted_results.append({
-                   "title": f"Additional Information for: {query}",
-                   "link": urls[0] if urls else f"https://search.openai.com/search?q={query.replace(' ', '+')}",
-                   "snippet": "This is a supplementary result based on the web search."
+                   "title": f"Additional Source {i}: {domain}",
+                   "link": url,
+                   "snippet": f"Additional information from {domain}"
                })
           
-           # Limit to max_results
-           final_results = formatted_results[:self.max_results]
-           logger.info(f"Successfully retrieved and formatted web search results with {len(urls)} extracted URLs")
-           return final_results
+           logger.info(f"Successfully retrieved and formatted web search results with {len(cleaned_urls)} extracted URLs")
+           return formatted_results
           
        except openai.OpenAIError as e:
            error_msg = f"OpenAI API error: {str(e)}"
@@ -191,64 +176,73 @@ class WebSearchAgent:
        # Create a consistent set of fallback results
        fallback_results = []
       
-       # Create a search query URL for the fallback
-       encoded_query = query.replace(' ', '+')
-       search_url = f"https://search.openai.com/search?q={encoded_query}"
-      
        # Add a header result explaining the fallback
        fallback_results.append({
-           "title": f"Web Search Unavailable for: {query}",
-           "link": "https://search.failed/web_search_unavailable",
-           "snippet": f"Web search could not be performed due to: {reason}. The following are placeholder results."
-       })
-      
-       # Add a single additional fallback result with a more meaningful URL
-       fallback_results.append({
-           "title": f"Fallback Information for '{query}'",
-           "link": "https://search.failed/fallback_information",
-           "snippet": f"This is a generated result about {query} based on available knowledge. Note: Web search failed due to {reason}."
+           "title": "Web Search Result",
+           "link": "https://example.com",
+           "snippet": f"I apologize, but I couldn't perform a web search at this time ({reason}). I'll try to answer based on my general knowledge."
        })
       
        return fallback_results
   
   
-   def search(self, query: str) -> List[Dict[str, str]]:
+   def search(self, query: str) -> Dict[str, Any]:
        """
        Perform a web search using the configured search engine.
-      
+       
        Args:
            query: The search query.
-          
+           
        Returns:
-           A list of dictionaries containing search results.
-      
+           A dictionary containing search results and metadata.
+       
        Raises:
            ValueError: If the configured search engine is not supported.
        """
        logger.info(f"Web search triggered for query: '{query}'")
-      
+       
        start_time = __import__('time').time()
        max_retries = 3
        retry_count = 0
-      
+       
        while retry_count < max_retries:
            try:
                # Always use OpenAI search
                results = self._openai_search(query)
-              
+               
+               # Format the results into a proper response dictionary
+               response = {
+                   'answer': results[1]['snippet'] if len(results) > 1 else "No answer found",
+                   'context': "\n\n".join(result['snippet'] for result in results),
+                   'sources': [result['link'] for result in results if result['link'] != "https://example.com"],
+                   'metadata': {
+                       'query': query,
+                       'result_count': len(results),
+                       'search_engine': 'openai'
+                   }
+               }
+               
                # If we got results successfully, break out of the retry loop
                break
-              
+               
            except openai.OpenAIError as e:
                retry_count += 1
                error_str = str(e).lower()
-              
+               
                # Check if this is a quota exceeded error or rate limit error
                if ("exceeded" in error_str and "quota" in error_str) or "resourceexhausted" in error_str or "rate limit" in error_str or "429" in error_str:
-                   logger.warning(f"API quota or rate limit exceeded: {str(e)}. Returning fallback results without retrying.")
-                   results = self._generate_fallback_results(query, "API quota or rate limit exceeded")
+                   logger.warning(f"API quota or rate limit exceeded: {str(e)}. Returning fallback results.")
+                   response = {
+                       'answer': f"I apologize, but I couldn't perform the web search due to API limitations: {str(e)}",
+                       'context': "",
+                       'sources': [],
+                       'metadata': {
+                           'error': 'API quota or rate limit exceeded',
+                           'query': query
+                       }
+                   }
                    break
-              
+               
                # For other errors, implement exponential backoff
                if retry_count < max_retries:
                    # Calculate backoff time: 2^retry_count + random jitter
@@ -257,19 +251,35 @@ class WebSearchAgent:
                    time.sleep(backoff_time)
                else:
                    logger.error(f"All {max_retries} search attempts failed. Last error: {str(e)}")
-                   results = self._generate_fallback_results(query, f"All {max_retries} attempts failed")
-          
+                   response = {
+                       'answer': f"I apologize, but I couldn't perform the web search after {max_retries} attempts.",
+                       'context': "",
+                       'sources': [],
+                       'metadata': {
+                           'error': f'All {max_retries} attempts failed',
+                           'query': query
+                       }
+                   }
+           
            except Exception as e:
                logger.error(f"Unexpected error in search: {str(e)}")
-               results = self._generate_fallback_results(query, "Unexpected error")
+               response = {
+                   'answer': "I apologize, but I encountered an unexpected error during the web search.",
+                   'context': "",
+                   'sources': [],
+                   'metadata': {
+                       'error': str(e),
+                       'query': query
+                   }
+               }
                break
-      
+       
        end_time = __import__('time').time()
        duration = round(end_time - start_time, 2)
-      
-       logger.info(f"Web search completed in {duration}s. Retrieved {len(results)} results for query: '{query}'")
-      
-       return results
+       
+       logger.info(f"Web search completed in {duration}s. Retrieved {len(response.get('sources', []))} results for query: '{query}'")
+       
+       return response
   
    def is_search_needed(self, query: str, context: str) -> Tuple[bool, str]:
        """

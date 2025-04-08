@@ -1,4 +1,4 @@
-from .final_decorator import finalclass
+from final_decorator import finalclass
 import logging
 import os
 import json
@@ -7,13 +7,13 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 from dotenv import load_dotenv
 
-from .agents.conversational import ConversationalAgent
-from .agents.websearch import WebSearchAgent
+from agents.conversational import ConversationalAgent
+from agents.websearch import WebSearchAgent
 
-from .rag.retrieval import RAG_Pipeline
-from .rag.self_retrieval import SelfRAG
-from .rag.corrective_retrieval import CorrectiveRAG
-from .rag.adaptive_retrieval import AdaptiveRAG
+from rag.retrieval import RAG_Pipeline
+from rag.self_retrieval import SelfRAG
+from rag.corrective_retrieval import CorrectiveRAG
+from rag.adaptive_retrieval import AdaptiveRAG
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
