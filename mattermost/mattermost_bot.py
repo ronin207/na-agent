@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import logging
 import threading
 import time
+from threading import Event
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,11 @@ MATTERMOST_URL = os.getenv('MATTERMOST_URL')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 BOT_USERNAME = os.getenv('BOT_USERNAME')
 BOT_ICON_URL = os.getenv('BOT_ICON_URL', 'https://example.com/bot-icon.png')
+
+HEADERS = {
+    'Authorization': f'Bearer {BOT_TOKEN}',
+    'Content-Type': 'application/json'
+}
 
 def send_message(channel_id, message, response_type='in_channel'):
     """Send a message to a Mattermost channel"""
@@ -71,24 +77,16 @@ def show_typing(channel_id):
         return None
 
 def show_typing_continuous(channel_id, stop_event):
-    """Show typing indicator continuously in a Mattermost channel until stop_event is set"""
-    headers = {
-        'Authorization': f'Bearer {BOT_TOKEN}',
-        'Content-Type': 'application/json'
-    }
-    
+    """Show typing indicator continuously until stop_event is set"""
     while not stop_event.is_set():
         try:
-            response = requests.post(
-                f'{MATTERMOST_URL}/api/v4/users/me/typing',
-                headers=headers,
-                json={'channel_id': channel_id}
+            requests.post(
+                f'{MATTERMOST_URL}/api/v4/channels/{channel_id}/typing',
+                headers=HEADERS
             )
-            response.raise_for_status()
-            # Sleep for 3 seconds before sending the next typing indicator
-            time.sleep(3)
+            time.sleep(5)  # Show typing indicator every 5 seconds
         except Exception as e:
-            logger.error(f"Error showing typing indicator: {str(e)}")
+            logger.error(f"Error showing typing indicator: {e}")
             break
 
 def process_query(text, channel_id, user_name):
@@ -113,15 +111,15 @@ def process_query(text, channel_id, user_name):
             target=show_typing_continuous,
             args=(channel_id, stop_typing)
         )
-        typing_thread.daemon = True  # Make the thread daemon so it exits when the main thread exits
+        typing_thread.daemon = True
         typing_thread.start()
 
         try:
-            # Forward the query to the RAG pipeline
+            # Forward the query to the RAG pipeline with increased timeout
             response = requests.post(
                 'http://localhost:5001/query',
                 json={'text': text},
-                timeout=30
+                timeout=120  # Increase timeout to 120 seconds
             )
             response.raise_for_status()
             response_data = response.json()
@@ -136,7 +134,7 @@ def process_query(text, channel_id, user_name):
 
             # Stop the typing indicator
             stop_typing.set()
-            typing_thread.join(timeout=1)  # Wait for the typing thread to finish
+            typing_thread.join(timeout=1)
 
             # Send the formatted message
             send_message(channel_id, formatted_message)
@@ -162,6 +160,9 @@ def mattermost_webhook():
         channel_id = data.get('channel_id', '')
         user_name = data.get('user_name', 'user')
         
+        # Log the incoming webhook data for debugging
+        logger.info(f"Received webhook data: {json.dumps(data, indent=2)}")
+        
         # Handle slash command
         if 'command' in data:
             text = data.get('text', '').strip()
@@ -172,6 +173,11 @@ def mattermost_webhook():
             message = data.get('text', '').strip()
             trigger_word = f"@{BOT_USERNAME}"
             
+            # Check if this is an edited post
+            is_edited = data.get('post', {}).get('is_edited', False)
+            if is_edited:
+                logger.info("Processing edited message")
+            
             # Log the incoming message for debugging
             logger.info(f"Received message: {message}")
             logger.info(f"Looking for trigger word: {trigger_word}")
@@ -180,6 +186,13 @@ def mattermost_webhook():
                 # Remove the mention and get the actual query
                 query = message.replace(trigger_word, '').strip()
                 logger.info(f"Extracted query: {query}")
+                
+                # If it's an edited message, add a note to the response
+                if is_edited:
+                    original_query = process_query(query, channel_id, user_name)
+                    if isinstance(original_query, dict):
+                        original_query['text'] = "(Edited) " + original_query.get('text', '')
+                    return original_query
                 return process_query(query, channel_id, user_name)
             
         return jsonify({'response_type': 'ephemeral'})
@@ -188,6 +201,58 @@ def mattermost_webhook():
         error_message = f"Error processing webhook: {str(e)}"
         logger.error(error_message)
         return jsonify({'text': error_message, 'response_type': 'ephemeral'})
+
+def handle_lecture_command(data):
+    """Handle /lecture command"""
+    try:
+        # Extract channel_id and text from the data
+        channel_id = data.get('channel_id')
+        text = data.get('text', '').strip()
+        
+        if not text:
+            send_message(channel_id, "Please provide a query after the /lecture command.")
+            return
+            
+        logger.info(f"Processing lecture query: {text}")
+        
+        # Create a stop event for the typing indicator
+        stop_typing = Event()
+        
+        # Start typing indicator in a separate thread
+        typing_thread = threading.Thread(
+            target=show_typing_continuous,
+            args=(channel_id, stop_typing)
+        )
+        typing_thread.start()
+        
+        try:
+            # Make request to RAG pipeline
+            response = requests.post(
+                'http://localhost:5000/query',
+                json={'text': text},
+                timeout=120
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # Format and send the response
+            answer = result.get('answer', 'No answer found')
+            send_message(channel_id, answer)
+            
+        except requests.Timeout:
+            send_message(channel_id, "The query took too long to process. Please try again with a simpler query.")
+        except requests.RequestException as e:
+            logger.error(f"Error making request to RAG pipeline: {e}")
+            send_message(channel_id, "Sorry, there was an error processing your query. Please try again later.")
+        finally:
+            # Stop the typing indicator
+            stop_typing.set()
+            typing_thread.join()
+            
+    except Exception as e:
+        logger.error(f"Error handling lecture command: {e}")
+        if channel_id:
+            send_message(channel_id, "Sorry, there was an error processing your command.")
 
 if __name__ == '__main__':
     # Verify environment variables

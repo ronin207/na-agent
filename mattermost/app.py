@@ -99,6 +99,11 @@ def query():
         logger.error(f"Error processing query: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy'}), 200
+
 if __name__ == '__main__':
     logger.debug("Starting application...")
     # Ensure the RAG pipeline is set up before starting the Flask app
