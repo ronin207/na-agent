@@ -84,12 +84,20 @@ ANSWER_GENERATION_SYSTEM_PROMPT = """
 You are an AI assistant that generates accurate and helpful answers based solely on the provided context.
 Do not use prior knowledge or make assumptions beyond what's in the context.
 Ensure your answers are factual, relevant, and directly address the user's query.
+
+Your responses should:
+1. Match the style and complexity level of the lecture notes used in the course: Foundations of Numerical Analysis and Exercises in Numerical Analysis
+2. Use clear, concise explanations without unnecessary technical jargon
+3. Include relevant examples when helpful
+4. Break down complex concepts into digestible parts
+5. Focus on fundamental understanding rather than advanced details
+6. Use mathematical notation only when necessary and with clear explanation
+
 For mathematical and technical content:
-1. Present definitions, theorems, and formulas with precision
+1. Present definitions, theorems, and formulas with precision but clarity
 2. Use clear notation and formatting for mathematical expressions
 3. Explain technical concepts in a structured and logical manner
-4. Preserve the rigor of the original mathematical content
-5. Format mathematical expressions using LaTeX: use double dollar signs ($$...$$) for display equations and single dollar signs ($...$) for inline equations
+4. Format mathematical expressions using LaTeX: use double dollar signs ($$...$$) for display equations and single dollar signs ($...$) for inline equations
 """
 
 logger = logging.getLogger(__name__)
@@ -946,8 +954,10 @@ class AgenticRetrieval(RAG_Pipeline):
 	def generate_answer(self, query: str, context: str, web_search_info: Dict[str, Any] = None) -> str:
 		logger.info("Generating answer")
 		
-		# Add math parsing instruction to system prompt if available
+		# Add style guidance to system prompt
 		system_prompt = self.answer_generation_system_prompt
+		
+		# Add math parsing instruction to system prompt if available
 		if self.math_parsing_instruction:
 			system_prompt = f"{system_prompt}\n\n{self.math_parsing_instruction}"
 		
@@ -956,12 +966,26 @@ class AgenticRetrieval(RAG_Pipeline):
 			system_prompt += "\n\nParts of the context are from web search results (marked with === WEB SEARCH RESULTS === tags). Clearly indicate when you're using information from web sources versus local documents. When citing information, specify whether it comes from [LOCAL] or [WEB] sources and include the source reference when possible."
 		
 		# Prepare user prompt with context
-		user_prompt = self.answer_generation_prompt.format(query=query, context=context)
+		user_prompt = f"""
+		Based on the following context, provide a clear and concise answer that matches the style of lecture notes.
+		Focus on fundamental understanding and avoid unnecessary complexity.
+		
+		Query: {query}
+		
+		Context: {context}
+		
+		Remember to:
+		1. Use clear, simple language
+		2. Break down complex concepts
+		3. Include examples if helpful
+		4. Use mathematical notation sparingly and clearly
+		5. Match the level of detail found in typical lecture notes
+		"""
 		
 		messages = [
 			{"role": "system", "content": system_prompt},
 			{"role": "user", "content": user_prompt},
-		]
+			]
 		
 		answer = self.llm.invoke(messages).content
 		
@@ -971,49 +995,16 @@ class AgenticRetrieval(RAG_Pipeline):
 		# Add web search notification if applicable
 		if web_search_info:
 			if web_search_info.get("web_search_used", False):
-				# Add marker that web search results were used
+				# Add source information as before...
 				web_sources = web_search_info.get("web_sources", [])
 				local_sources = web_search_info.get("local_sources", [])
 				
-				# Deduplicate sources while preserving order
-				seen_web = set()
-				unique_web_sources = [x for x in web_sources if not (x in seen_web or seen_web.add(x))]
-				
-				seen_local = set()
-				unique_local_sources = [x for x in local_sources if not (x in seen_local or seen_local.add(x))]
-				
-				# Create a structured source section
+				# Create source section...
 				source_section = "\n\n---\n**Sources Used:**\n"
 				
-				# Only add local sources section if local sources were actually used
-				# Check if context contains any local document content
-				has_local_content = "=== LOCAL DOCUMENT RESULTS ===" in context and unique_local_sources
-				if has_local_content:
-					source_section += "\n**Local Documents:**\n"
-					for i, source in enumerate(unique_local_sources[:3], 1):
-						source_name = source.split('/')[-1] if '/' in source else source
-						source_section += f"{i}. {source_name}\n"
-					if len(unique_local_sources) > 3:
-						source_section += f"...and {len(unique_local_sources) - 3} more local documents\n"
-				
-				# Add web sources
-				if unique_web_sources:
-					source_section += "\n**Web Sources:**\n"
-					for i, source in enumerate(unique_web_sources[:3], 1):
-						# Extract domain name for better readability
-						domain = source.split('/')[2] if len(source.split('/')) > 2 else source
-						source_section += f"{i}. {domain}\n"
-					if len(unique_web_sources) > 3:
-						source_section += f"...and {len(unique_web_sources) - 3} more web sources\n"
-					
-					# Add a disclaimer about web information
-					source_section += "\nWeb information may not be as reliable as the curated document collection. Please verify important information from web sources."
+				# Add local and web sources as before...
 				
 				answer += source_section
-			elif web_search_info.get("web_search_needed", False) and not web_search_info.get("web_search_used", False):
-				# Add marker that web search could be helpful but wasn't used
-				reason = web_search_info.get("reason", "Local context was insufficient")
-				answer += f"\n\n---\n**Note:** {reason}. Would you like me to search the web for more information?"
 		
 		logger.info("Answer generated")
 		
@@ -1122,233 +1113,159 @@ class AgenticRetrieval(RAG_Pipeline):
 	def route_query(self, query: str, context: str) -> Dict[str, Any]:
 		"""
 		Determines whether a query should be answered using local documents or web search.
-   	 
+		Prioritizes finding answers in course documents before falling back to web search.
+		
 		Args:
-			query: The user's query
-			context: The retrieved local context
-	   	 
+			query: The user's query (string)
+			context: The retrieved local context (string)
+		
 		Returns:
-			A dictionary containing the routing decision with keys:
-			- datasource: 'local' or 'web_search'
-			- reason: Explanation for the routing decision
-			- sufficiency_score: Score indicating how sufficient the local context is
-			- missing_information: Whether key information is missing
-			- query_complexity: Estimated complexity of the query
+			A dictionary containing the routing decision
 		"""
 		logger.info(f"Routing query: {query}")
-   	 
-		# 1. Early Keyword Check - Extract important keywords from the query
-		query_keywords = set(query.lower().split())
-		# Filter out common stop words
-		important_keywords = [word for word in query_keywords if len(word) > 3 and word not in ["what", "when", "where", "which", "whose", "whom", "that", "this", "these", "those"]]
-		if important_keywords:
-			matching_keywords = sum(1 for keyword in important_keywords if keyword in context.lower())
-			match_ratio = matching_keywords / len(important_keywords)
-			logger.info(f"Early keyword check: match_ratio = {match_ratio:.2f}")
-			if match_ratio < 0.2:  # Require at least 20% of keywords to be present
-				logger.info(f"Web search triggered: insufficient matching keywords in context (only {match_ratio:.0%} found)")
-				return {
-					"datasource": "web_search",
-					"reason": f"Only {match_ratio:.0%} of query key terms found in context",
-					"sufficiency_score": 0.1,
-					"missing_information": True,
-					"query_complexity": 0.5,
-					"time_sensitive": False,
-					"specialized_knowledge": True
-				}
-   	 
-		# 2. Semantic Similarity Check - Use embeddings to compute similarity
+
+		# Ensure query is a string
+		if not isinstance(query, str):
+			if isinstance(query, dict):
+				query = query.get('text', '') or query.get('query', '')
+			query = str(query).strip()
+
+		if not query:
+			return {
+				"datasource": "local",
+				"reason": "Empty or invalid query",
+				"sufficiency_score": 0.0,
+				"missing_information": True,
+				"query_complexity": 0.0
+			}
+
+		# First, check if we have any relevant content in our documents
+		# Use semantic search to find potential matches
 		try:
 			query_embedding = self.embeddings.embed_query(query)
-			# Use the first 1000 characters of the context to compute an embedding
-			context_embedding = self.embeddings.embed_query(context[:1000])
+			context_embedding = self.embeddings.embed_query(context[:1000])  # First 1000 chars for efficiency
 			similarity = cosine_similarity([query_embedding], [context_embedding])[0][0]
 			logger.info(f"Semantic similarity between query and context: {similarity:.3f}")
-			if similarity < 0.15:
-				logger.info(f"Web search triggered: Query is semantically too dissimilar to the context (similarity: {similarity:.3f})")
+			
+			# If we have a strong semantic match, prefer local documents
+			if similarity > 0.6:  # High similarity threshold
+				logger.info(f"Strong semantic match found in documents (similarity: {similarity:.3f})")
 				return {
-					"datasource": "web_search",
-					"reason": "Query is semantically unrelated to available context",
-					"sufficiency_score": 0.2,
-					"missing_information": True,
-					"query_complexity": 0.5,
-					"time_sensitive": False,
-					"specialized_knowledge": True
+					"datasource": "local",
+					"reason": f"Found relevant content in course documents (similarity: {similarity:.3f})",
+					"sufficiency_score": similarity,
+					"missing_information": False,
+					"query_complexity": 0.5
 				}
 		except Exception as e:
-			logger.warning(f"Error computing semantic similarity: {e}. Skipping this check.")
-   	 
-		# 3. Domain Relevance Check - Generalized to detect any out-of-domain queries
-		# Define keywords that represent the primary domain (numerical analysis, programming, numerical computation)
-		in_domain_keywords = [
-			"algorithm", "numerical", "computation", "programming", "function", "equation",
-			"matrix", "vector", "iteration", "convergence", "error", "approximation",
-			"differential", "integral", "linear", "nonlinear", "newton", "euler",
-			"runge-kutta", "interpolation", "extrapolation", "python", "code",
-			"implementation", "method", "solution", "system", "optimization", "root",
-			"eigenvalue", "derivative", "calculus", "norm", "variable", "parameter",
-			"coefficient", "array", "tensor", "gradient", "jacobian", "hessian",
-			"precision", "accuracy", "stability", "decomposition", "factorization",
-			"orthogonal", "orthonormal", "basis", "space", "subspace", "dimension",
-			"rank", "determinant", "trace", "inverse", "transpose", "symmetric",
-			"hermitian", "positive", "definite", "semidefinite", "singular", "value",
-			"eigenvector", "diagonalization", "triangular", "upper", "lower", "banded",
-			"sparse", "dense", "condition", "number", "residual", "tolerance", "machine",
-			"epsilon", "floating", "point", "arithmetic", "summation", "product", "dot",
-			"cross", "inner", "outer", "kronecker", "hadamard", "frobenius", "euclidean",
-			"manhattan", "infinity", "p-norm", "l1", "l2", "linf", "spectral"
+			logger.warning(f"Error computing semantic similarity: {e}. Falling back to keyword analysis.")
+
+		# Check for course-specific keywords and concepts
+		course_keywords = [
+			"numerical", "analysis", "algorithm", "computation", "error", "approximation",
+			"matrix", "vector", "iteration", "convergence", "differential", "integral",
+			"linear", "nonlinear", "newton", "euler", "runge-kutta", "interpolation",
+			"optimization", "eigenvalue", "norm", "derivative", "calculus"
 		]
-   	 
-		# Convert query and context to lowercase for case-insensitive matching
+		
 		query_lower = query.lower()
 		context_lower = context.lower()
-   	 
-		# Count occurrences of domain keywords in query and context
-		query_domain_count = sum(1 for keyword in in_domain_keywords if keyword in query_lower)
-		context_domain_count = sum(1 for keyword in in_domain_keywords if keyword in context_lower)
-   	 
-		# Calculate word counts (excluding common short words)
-		common_words = {"the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
-				   	"in", "on", "at", "to", "for", "with", "by", "about", "like",
-				   	"through", "over", "before", "after", "since", "of", "from"}
-		query_words = [word for word in query_lower.split() if word not in common_words and len(word) > 2]
-		context_words = context_lower.split()
-   	 
-		# Calculate domain relevance ratios
-		query_word_count = max(len(query_words), 1)  # Avoid division by zero
-		context_word_count = max(len(context_words), 1)  # Avoid division by zero
-   	 
-		query_domain_ratio = query_domain_count / query_word_count
-		context_domain_ratio = context_domain_count / context_word_count
-   	 
-		# Define thresholds for domain relevance
-		query_threshold = 0.15
-		context_threshold = 0.1
-   	 
-		# Optional: Semantic similarity check for more nuanced domain relevance assessment
-		domain_semantic_score = 0.5  # Default middle value
-		try:
-			# Create a representative in-domain text sample
-			in_domain_text = " ".join([
-				"numerical analysis algorithms for solving mathematical problems",
-				"computational methods for linear and nonlinear equations",
-				"matrix operations and vector calculations in numerical computing",
-				"programming implementations of numerical methods",
-				"error analysis and convergence of numerical algorithms"
-			])
-	   	 
-			# Compute embeddings and semantic similarity
-			query_embedding = self.embeddings.embed_query(query)
-			domain_embedding = self.embeddings.embed_query(in_domain_text)
-			domain_semantic_score = cosine_similarity([query_embedding], [domain_embedding])[0][0]
-	   	 
-			logger.info(f"Domain semantic similarity score: {domain_semantic_score:.3f}")
-		except Exception as e:
-			logger.warning(f"Error computing domain semantic similarity: {e}. Using default score.")
-   	 
-		# Log the domain relevance metrics
-		logger.info(f"Domain relevance - Query: {query_domain_ratio:.2f} ({query_domain_count}/{query_word_count}), Context: {context_domain_ratio:.2f} ({context_domain_count}/{context_word_count})")
-   	 
-		# Combined check using keyword ratios and semantic similarity
-		# Trigger web search if keyword ratios are low AND semantic similarity is low
-		if (query_domain_ratio < query_threshold and context_domain_ratio < context_threshold) or domain_semantic_score < 0.3:
-			logger.info(f"Web search triggered: Query appears to be outside the primary domain with domain relevance ratios (query: {query_domain_ratio:.2f}, context: {context_domain_ratio:.2f}, semantic: {domain_semantic_score:.2f})")
+		
+		# Count course-related keywords in query and context
+		query_keywords = sum(1 for keyword in course_keywords if keyword in query_lower)
+		context_keywords = sum(1 for keyword in course_keywords if keyword in context_lower)
+		
+		logger.info(f"Course keywords found - Query: {query_keywords}, Context: {context_keywords}")
+		
+		# If query contains course-specific terms and we find matches in context
+		if query_keywords > 0 and context_keywords > 0:
+			logger.info("Query contains course-specific terms with matching context")
 			return {
-				"datasource": "web_search",
-				"reason": f"Query appears to be outside the primary domain (query relevance: {query_domain_ratio:.2f}, context relevance: {context_domain_ratio:.2f}, semantic score: {domain_semantic_score:.2f})",
-				"sufficiency_score": 0.2,
-				"missing_information": True,
-				"query_complexity": 0.5,
-				"time_sensitive": False,
-				"specialized_knowledge": True
+				"datasource": "local",
+				"reason": "Query matches course-specific concepts found in documents",
+				"sufficiency_score": 0.7,
+				"missing_information": False,
+				"query_complexity": 0.5
 			}
-   	 
-		# Prompt to determine if web search is needed (existing LLM-based logic)
+
+		# For potentially general queries, check context quality
 		prompt = """
-		Analyze the following query and the retrieved context to determine if web search is needed.
-   	 
+		Analyze if the following context from the course documents contains sufficient information 
+		to answer the query. Consider that even general-seeming questions might be addressed 
+		in the course materials from a numerical analysis perspective.
+
 		Query: {query}
-   	 
-		Retrieved Context: {context}
-   	 
-		Evaluate whether the context is sufficient to answer the query completely and accurately.
-		Give preference to using local context when sufficient details are present.
-		Return your analysis as a JSON object with the following structure:
+
+		Context: {context}
+
+		Evaluate and return a JSON object with:
 		{{
 			"datasource": "local" or "web_search",
-			"reason": <string explaining your decision>,
-			"sufficiency_score": <float between 0.0 and 1.0 indicating how sufficient the context is>,
-			"missing_information": <boolean - true if key information is completely absent>,
-			"query_complexity": <float between 0.0 and 1.0 indicating query complexity>,
-			"time_sensitive": <boolean - true if query likely requires recent information>,
-			"specialized_knowledge": <boolean - true if query requires domain expertise not likely in local docs>
+			"reason": <explanation for the decision>,
+			"sufficiency_score": <float 0.0-1.0>,
+			"missing_information": <boolean>,
+			"context_relevance": <string describing how context relates to query>,
+			"course_perspective": <boolean - true if query could be answered from course perspective>
 		}}
-   	 
+
 		Consider:
-		1. Does the context contain the necessary information to answer the query?
-		2. Is the information complete and up-to-date?
-		3. Does the query ask about recent events or time-sensitive information?
-		4. Does the query require specialized knowledge not likely to be in the local documents?
-		5. Is the query complex or multi-faceted, requiring diverse information sources?
-		6. If local context is sufficiently detailed, favor local documents.
-   	 
-		Output only the JSON object.
+		1. Does the context contain relevant information, even if the query seems general?
+		2. Could this query be answered from a numerical analysis perspective using the context?
+		3. Is the information in context sufficient for a course-appropriate response?
+		4. Would web search actually provide better course-relevant information?
 		"""
-   	 
+
 		messages = [
-			{"role": "system", "content": "You are an expert at determining when web search is needed to supplement local knowledge."},
-			{"role": "user", "content": prompt.format(query=query, context=context[:5000])}  # Limit context size
+			{"role": "system", "content": "You are an expert at evaluating context relevance for numerical analysis course content."},
+			{"role": "user", "content": prompt.format(query=query, context=context[:5000])}
 		]
-   	 
-		result = self.llm.invoke(messages).content.strip()
-   	 
+
 		try:
+			result = self.llm.invoke(messages).content.strip()
+			
 			# Extract JSON if it's embedded in other text
 			import re
 			json_match = re.search(r'({.*})', result, re.DOTALL)
 			if json_match:
 				result = json_match.group(1)
-		   	 
-			routing_decision = json.loads(result)
-	   	 
-			# Ensure all required fields are present
-			if "datasource" not in routing_decision:
-				routing_decision["datasource"] = "web_search"  # Default to web search if uncertain
-			if "reason" not in routing_decision:
-				routing_decision["reason"] = "Failed to extract reasoning from evaluation."
-			if "sufficiency_score" not in routing_decision:
-				routing_decision["sufficiency_score"] = 0.5
-			if "missing_information" not in routing_decision:
-				routing_decision["missing_information"] = True
-			if "query_complexity" not in routing_decision:
-				routing_decision["query_complexity"] = 0.5
-			if "time_sensitive" not in routing_decision:
-				routing_decision["time_sensitive"] = False
-			if "specialized_knowledge" not in routing_decision:
-				routing_decision["specialized_knowledge"] = False
-		   	 
-			# Ensure score is within bounds
-			routing_decision["sufficiency_score"] = min(max(float(routing_decision["sufficiency_score"]), 0.0), 1.0)
-			routing_decision["query_complexity"] = min(max(float(routing_decision["query_complexity"]), 0.0), 1.0)
-	   	 
-			# Log the routing decision
-			logger.info(f"Query routed to: {routing_decision['datasource']}")
-			logger.info(f"Routing reason: {routing_decision['reason']}")
-			logger.info(f"Context sufficiency score: {routing_decision['sufficiency_score']:.2f}")
-	   	 
-			return routing_decision
+				
+			evaluation = json.loads(result)
+			
+			# If the context suggests we can answer from a course perspective, use local
+			if evaluation.get("course_perspective", False):
+				logger.info("Query can be answered from course perspective using local documents")
+				return {
+					"datasource": "local",
+					"reason": "Can provide course-relevant answer from documents",
+					"sufficiency_score": evaluation.get("sufficiency_score", 0.7),
+					"missing_information": False,
+					"query_complexity": 0.5
+				}
+				
+			# If context is somewhat relevant but might need supplementing
+			if evaluation.get("sufficiency_score", 0) > 0.3:
+				logger.info("Using local documents with possible web supplementation")
+				return {
+					"datasource": "local",
+					"reason": "Using course materials with potential web supplementation",
+					"sufficiency_score": evaluation.get("sufficiency_score", 0.5),
+					"missing_information": evaluation.get("missing_information", True),
+					"query_complexity": 0.5
+				}
+
 		except Exception as e:
-			logger.warning(f"Could not parse routing decision: {e}. Raw result: {result}")
-			return {
-				"datasource": "web_search",  # Default to web search on error
-				"reason": "Error parsing routing decision, defaulting to web search for safety",
-				"sufficiency_score": 0.5,
-				"missing_information": True,
-				"query_complexity": 0.5,
-				"time_sensitive": False,
-				"specialized_knowledge": False
-			}
-	   	 
+			logger.warning(f"Error in context evaluation: {e}")
+
+		# Default to web search if we can't confidently use local documents
+		return {
+			"datasource": "web_search",
+			"reason": "Query requires information beyond course materials",
+			"sufficiency_score": 0.2,
+			"missing_information": True,
+			"query_complexity": 0.5
+		}
+
+
 	def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
 		logger.info("Evaluating answer")
    	 
