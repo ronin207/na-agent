@@ -28,8 +28,15 @@ HEADERS = {
     'Content-Type': 'application/json'
 }
 
-def send_message(channel_id, message, response_type='in_channel'):
-    """Send a message to a Mattermost channel"""
+def send_message(channel_id, message, response_type='in_channel', root_id=None):
+    """Send a message to a Mattermost channel
+    
+    Args:
+        channel_id: The ID of the channel to send the message to
+        message: The message content
+        response_type: The type of response ('in_channel' or 'ephemeral')
+        root_id: The ID of the root post to reply to (for creating/continuing a thread)
+    """
     headers = {
         'Authorization': f'Bearer {BOT_TOKEN}',
         'Content-Type': 'application/json'
@@ -45,14 +52,34 @@ def send_message(channel_id, message, response_type='in_channel'):
         }
     }
     
+    # Add root_id to payload if provided to create/continue a thread
+    if root_id:
+        logger.info(f"Creating thread reply - root_id: {root_id}")
+        payload['root_id'] = root_id
+        logger.info(f"Full payload for thread reply: {json.dumps(payload, indent=2)}")
+    else:
+        logger.info("Creating new message (no thread)")
+    
     try:
+        logger.info(f"Sending message to channel {channel_id}")
         response = requests.post(
             f'{MATTERMOST_URL}/api/v4/posts',
             headers=headers,
             json=payload
         )
         response.raise_for_status()
-        return response.json()
+        
+        # Log the response for debugging
+        response_data = response.json()
+        logger.info(f"Mattermost API response: {json.dumps(response_data, indent=2)}")
+        
+        if 'id' in response_data:
+            if root_id:
+                logger.info(f"Successfully created thread reply - Message ID: {response_data['id']}, Thread ID: {root_id}")
+            else:
+                logger.info(f"Successfully created new message - ID: {response_data['id']}")
+        
+        return response_data
     except Exception as e:
         logger.error(f"Error sending message to Mattermost: {str(e)}")
         raise
@@ -91,8 +118,15 @@ def show_typing_continuous(channel_id, stop_event):
             logger.error(f"Error showing typing indicator: {e}")
             break
 
-def process_query(text, channel_id, user_name):
-    """Process a query and return the response"""
+def process_query(text, channel_id, user_name, root_id=None):
+    """Process a query and return the response
+    
+    Args:
+        text: The query text
+        channel_id: The ID of the channel
+        user_name: The name of the user who sent the query
+        root_id: The ID of the message to reply to (for creating a thread)
+    """
     if not text or text.lower() == 'help':
         help_message = (
             "👋 Hi! I'm your knowledge assistant. Ask me anything!\n\n"
@@ -101,6 +135,8 @@ def process_query(text, channel_id, user_name):
             "**Examples**:\n"
             "- `@knowledge-agent Can you explain the difference between X and Y?`\n"
         )
+        # For help messages, always send as a main message (no thread)
+        logger.info("Sending help message as main message")
         send_message(channel_id, help_message)
         return jsonify({'response_type': 'in_channel'})
 
@@ -126,21 +162,22 @@ def process_query(text, channel_id, user_name):
             response.raise_for_status()
             response_data = response.json()
 
-            # Format the message
-            formatted_message = (
-                f"**Question from @{user_name}**:\n"
-                f"{text}\n\n"
-                f"**Answer**:\n"
-                f"{response_data['text']}"
-            )
+            # Get the response text
+            answer = response_data.get('text', 'No answer available')
 
             # Stop the typing indicator
             stop_typing.set()
             typing_thread.join(timeout=1)
 
-            # Send the formatted message
-            send_message(channel_id, formatted_message)
-            return jsonify({'response_type': 'in_channel'})
+            # Send as a reply if root_id is provided, otherwise as a new message
+            logger.info(f"Sending response with root_id: {root_id}")
+            response = send_message(channel_id, answer, root_id=root_id)
+
+            # Return the response with root_id if available
+            return jsonify({
+                'response_type': 'in_channel',
+                'root_id': root_id
+            })
 
         finally:
             # Ensure we stop the typing indicator even if an error occurs
@@ -150,7 +187,13 @@ def process_query(text, channel_id, user_name):
     except requests.exceptions.RequestException as e:
         error_message = f"Error processing query: {str(e)}"
         logger.error(error_message)
-        return jsonify({'text': error_message, 'response_type': 'ephemeral'})
+        # Send error message as a reply if root_id is provided
+        send_message(channel_id, error_message, root_id=root_id)
+        return jsonify({
+            'text': error_message,
+            'response_type': 'ephemeral',
+            'root_id': root_id
+        })
 
 @app.route('/mattermost', methods=['POST'])
 def mattermost_webhook():
@@ -159,43 +202,51 @@ def mattermost_webhook():
         if not data:
             return jsonify({'error': 'No data provided'}), 400
 
+        # Log the incoming webhook data for debugging
+        logger.info(f"Received webhook data: {json.dumps(data, indent=2)}")
+
         channel_id = data.get('channel_id', '')
         user_name = data.get('user_name', 'user')
         
-        # Log the incoming webhook data for debugging
-        logger.info(f"Received webhook data: {json.dumps(data, indent=2)}")
+        # Extract post data and ID
+        post_id = None
+        if 'post' in data:
+            try:
+                if isinstance(data['post'], str):
+                    post_data = json.loads(data['post'])
+                else:
+                    post_data = data['post']
+                
+                # Get the ID of the message we want to reply to
+                post_id = post_data.get('id')
+                logger.info(f"Extracted post_id from post data: {post_id}")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Error parsing post data: {e}")
         
-        # Handle slash command
-        if 'command' in data:
-            text = data.get('text', '').strip()
-            return process_query(text, channel_id, user_name)
+        # If post_id is still None, try to get it from the trigger_id or other fields
+        if post_id is None:
+            post_id = data.get('trigger_id') or data.get('post_id')
+            logger.info(f"Attempting to get post_id from trigger_id or post_id: {post_id}")
         
         # Handle mentions (from outgoing webhook)
-        elif 'text' in data:
+        if 'text' in data:
             message = data.get('text', '').strip()
             trigger_word = f"@{BOT_USERNAME}"
-            
-            # Check if this is an edited post
-            is_edited = data.get('post', {}).get('is_edited', False)
-            if is_edited:
-                logger.info("Processing edited message")
-            
-            # Log the incoming message for debugging
-            logger.info(f"Received message: {message}")
-            logger.info(f"Looking for trigger word: {trigger_word}")
             
             if trigger_word in message:
                 # Remove the mention and get the actual query
                 query = message.replace(trigger_word, '').strip()
-                logger.info(f"Extracted query: {query}")
+                logger.info(f"Processing query: {query}")
+                logger.info(f"Message ID for reply: {post_id}")
                 
-                # If it's an edited message, add a note to the response
-                if is_edited:
-                    original_query = process_query(query, channel_id, user_name)
-                    if isinstance(original_query, dict):
-                        original_query['text'] = "(Edited) " + original_query.get('text', '')
-                    return original_query
-                return process_query(query, channel_id, user_name)
+                # Process the query and create a reply
+                return process_query(query, channel_id, user_name, post_id)
+        
+        # Handle slash command
+        elif 'command' in data:
+            text = data.get('text', '').strip()
+            return process_query(text, channel_id, user_name, post_id)
             
         return jsonify({'response_type': 'ephemeral'})
 
