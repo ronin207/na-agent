@@ -105,7 +105,16 @@ def health_check():
     return jsonify({'status': 'healthy'}), 200
 
 if __name__ == '__main__':
-    logger.debug("Starting application...")
+    # Verify environment variables
+    required_vars = ['OPENAI_API_KEY']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    
     # Ensure the RAG pipeline is set up before starting the Flask app
+    logger.debug("Setting up RAG pipeline...")
     asyncio.run(rag_pipeline.setup())
+    
+    # Start the Flask app
     app.run(host='0.0.0.0', port=5001) 
