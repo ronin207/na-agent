@@ -80,10 +80,12 @@ def show_typing_continuous(channel_id, stop_event):
     """Show typing indicator continuously until stop_event is set"""
     while not stop_event.is_set():
         try:
-            requests.post(
-                f'{MATTERMOST_URL}/api/v4/channels/{channel_id}/typing',
-                headers=HEADERS
+            response = requests.post(
+                f'{MATTERMOST_URL}/api/v4/users/me/typing',
+                headers=HEADERS,
+                json={'channel_id': channel_id}
             )
+            response.raise_for_status()
             time.sleep(5)  # Show typing indicator every 5 seconds
         except Exception as e:
             logger.error(f"Error showing typing indicator: {e}")
@@ -228,7 +230,7 @@ def handle_lecture_command(data):
         try:
             # Make request to RAG pipeline
             response = requests.post(
-                'http://localhost:5000/query',
+                'http://localhost:5001/query',
                 json={'text': text},
                 timeout=120
             )
