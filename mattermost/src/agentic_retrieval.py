@@ -980,6 +980,10 @@ class AgenticRetrieval(RAG_Pipeline):
 		3. Include examples if helpful
 		4. Use mathematical notation sparingly and clearly
 		5. Match the level of detail found in typical lecture notes
+		6. PRESERVE ALL LaTeX FORMATTING (both inline and display math) exactly as provided
+		7. Use $$...$$ for ALL mathematical expressions (both inline and display math)
+		8. When using information from web search results, clearly indicate this in the response
+		9. Do not include local document sources if the information comes from web search results
 		"""
 		
 		messages = [
@@ -993,18 +997,21 @@ class AgenticRetrieval(RAG_Pipeline):
 		answer = self._preserve_latex_expressions(answer)
 		
 		# Add web search notification if applicable
-		if web_search_info:
-			if web_search_info.get("web_search_used", False):
-				# Add source information as before...
-				web_sources = web_search_info.get("web_sources", [])
-				local_sources = web_search_info.get("local_sources", [])
-				
-				# Create source section...
-				source_section = "\n\n---\n**Sources Used:**\n"
-				
-				# Add local and web sources as before...
-				
-				answer += source_section
+		if web_search_info and web_search_info.get("web_search_used", False):
+			# Only include web sources, not local sources
+			web_sources = web_search_info.get("web_sources", [])
+			
+			# Create source section
+			source_section = "\n\n---\n**Sources Used:**\n"
+			
+			# Add web sources
+			if web_sources:
+				source_section += "\n".join([f"- {source}" for source in web_sources])
+			
+			answer += source_section
+			
+			# Add web search notification
+			answer += "\n\n*Note: This answer includes information from web search results.*"
 		
 		logger.info("Answer generated")
 		
@@ -1013,22 +1020,22 @@ class AgenticRetrieval(RAG_Pipeline):
 	def _preserve_latex_expressions(self, text: str) -> str:
 		"""
 		Preserve LaTeX expressions in the text to ensure they are properly displayed.
-		This handles both inline ($...$) and display ($$...$$) LaTeX expressions.
+		This handles both inline and display LaTeX expressions using $$...$$ format.
 		"""
 		import re
-   	 
+		
 		# Function to replace LaTeX expressions with a placeholder
 		def replace_latex(match):
 			return match.group(0)
-   	 
+		
 		# Handle display LaTeX expressions ($$...$$)
 		display_latex_pattern = r'\$\$(.*?)\$\$'
 		text = re.sub(display_latex_pattern, replace_latex, text, flags=re.DOTALL)
-   	 
-		# Handle inline LaTeX expressions ($...$)
-		inline_latex_pattern = r'\$(.*?)\$'
+		
+		# Handle inline LaTeX expressions ($$...$$)
+		inline_latex_pattern = r'\$\$(.*?)\$\$'
 		text = re.sub(inline_latex_pattern, replace_latex, text, flags=re.DOTALL)
-   	 
+		
 		return text
    	 
 	def determine_web_search_threshold(self, query: str) -> float:
@@ -1112,15 +1119,27 @@ class AgenticRetrieval(RAG_Pipeline):
 
 	def route_query(self, query: str, context: str) -> Dict[str, Any]:
 		"""
-		Determines whether a query should be answered using local documents or web search.
-		Prioritizes finding answers in course documents before falling back to web search.
+		Your task is to decide how to best answer a user's question. The process begins by first considering the subject matter of the query. 
+		Specifically, you need to determine if the question falls within the domain of numerical analysis. If, upon examination, you find that 
+		the query is not related to numerical analysis, then the appropriate course of action is to perform a web search to find the answer. 
+		However, if you determine that the query does indeed pertain to the field of numerical analysis, the next step is to consult a local 
+		vector store containing relevant documents. Within this vector store, you must search for contextual information that can directly 
+		answer the user's question. If, after searching the vector store, no suitable context is found, you should return a message indicating 
+		that the query is out of scope for the local documents. Conversely, if relevant contextual information is successfully retrieved from 
+		the vector store, you should then use this local information to formulate your answer and return the local result to the user.
 		
 		Args:
 			query: The user's query (string)
 			context: The retrieved local context (string)
 		
 		Returns:
-			A dictionary containing the routing decision
+			A dictionary containing the routing decision with the following keys:
+			- datasource: Either "web_search", "local", or "out_of_scope"
+			- reason: Explanation of the routing decision
+			- sufficiency_score: Score indicating how well the context matches the query
+			- missing_information: Boolean indicating if key information is missing
+			- query_complexity: Score indicating the complexity of the query
+			- needs_professor_assistance: Boolean indicating if professor assistance is needed
 		"""
 		logger.info(f"Routing query: {query}")
 
@@ -1136,134 +1155,97 @@ class AgenticRetrieval(RAG_Pipeline):
 				"reason": "Empty or invalid query",
 				"sufficiency_score": 0.0,
 				"missing_information": True,
-				"query_complexity": 0.0
+				"query_complexity": 0.0,
+				"needs_professor_assistance": False
 			}
 
-		# First, check if we have any relevant content in our documents
-		# Use semantic search to find potential matches
+		# Define numerical analysis domain keywords
+		domain_keywords = [
+			"numerical", "analysis", "algorithm", "computation", "error", "approximation",
+			"matrix", "vector", "iteration", "convergence", "differential", "integral",
+			"linear", "nonlinear", "newton", "euler", "runge-kutta", "interpolation",
+			"optimization", "eigenvalue", "norm", "derivative", "calculus", "numerical method",
+			"numerical solution", "numerical integration", "numerical differentiation",
+			"finite difference", "finite element", "numerical stability", "rounding error",
+			"truncation error", "numerical accuracy", "numerical precision"
+		]
+		
+		query_lower = query.lower()
+		is_domain_related = any(keyword in query_lower for keyword in domain_keywords)
+		
+		if not is_domain_related:
+			logger.info("Query is not related to numerical analysis domain")
+			return {
+				"datasource": "web_search",
+				"reason": "Query is not related to numerical analysis domain",
+				"sufficiency_score": 0.0,
+				"missing_information": True,
+				"query_complexity": 0.0,
+				"needs_professor_assistance": False
+			}
+
+		# For domain-related queries, check if we have specific technical content
+		technical_indicators = [
+			r'\$\$.*?\$\$',  # LaTeX display math
+			r'\$.*?\$',      # LaTeX inline math
+			r'equation', r'formula', r'theorem', r'proof', r'definition',
+			r'algorithm', r'method', r'technique', r'procedure',
+			r'example', r'problem', r'solution', r'derivation'
+		]
+		
+		has_technical_content = any(
+			re.search(pattern, context, re.IGNORECASE) 
+			for pattern in technical_indicators
+		)
+		
+		if not has_technical_content:
+			logger.info("No technical content found in local documents")
+			return {
+				"datasource": "out_of_scope",
+				"reason": "This topic is currently out of scope for the course materials",
+				"sufficiency_score": 0.0,
+				"missing_information": True,
+				"query_complexity": 0.0,
+				"needs_professor_assistance": True
+			}
+
+		# If we have technical content, perform semantic search
 		try:
 			query_embedding = self.embeddings.embed_query(query)
 			context_embedding = self.embeddings.embed_query(context[:1000])  # First 1000 chars for efficiency
 			similarity = cosine_similarity([query_embedding], [context_embedding])[0][0]
 			logger.info(f"Semantic similarity between query and context: {similarity:.3f}")
 			
-			# If we have a strong semantic match, prefer local documents
-			if similarity > 0.6:  # High similarity threshold
-				logger.info(f"Strong semantic match found in documents (similarity: {similarity:.3f})")
+			# Use a higher threshold for technical content
+			if similarity > 0.7:  # Increased threshold for technical content
+				logger.info(f"Strong semantic match found in technical documents (similarity: {similarity:.3f})")
 				return {
 					"datasource": "local",
-					"reason": f"Found relevant content in course documents (similarity: {similarity:.3f})",
+					"reason": f"Found relevant technical content in course documents (similarity: {similarity:.3f})",
 					"sufficiency_score": similarity,
 					"missing_information": False,
-					"query_complexity": 0.5
+					"query_complexity": 0.5,
+					"needs_professor_assistance": False
+				}
+			else:
+				return {
+					"datasource": "out_of_scope",
+					"reason": "This specific topic is not covered in sufficient detail in the course materials",
+					"sufficiency_score": similarity,
+					"missing_information": True,
+					"query_complexity": 0.5,
+					"needs_professor_assistance": True
 				}
 		except Exception as e:
-			logger.warning(f"Error computing semantic similarity: {e}. Falling back to keyword analysis.")
-
-		# Check for course-specific keywords and concepts
-		course_keywords = [
-			"numerical", "analysis", "algorithm", "computation", "error", "approximation",
-			"matrix", "vector", "iteration", "convergence", "differential", "integral",
-			"linear", "nonlinear", "newton", "euler", "runge-kutta", "interpolation",
-			"optimization", "eigenvalue", "norm", "derivative", "calculus"
-		]
-		
-		query_lower = query.lower()
-		context_lower = context.lower()
-		
-		# Count course-related keywords in query and context
-		query_keywords = sum(1 for keyword in course_keywords if keyword in query_lower)
-		context_keywords = sum(1 for keyword in course_keywords if keyword in context_lower)
-		
-		logger.info(f"Course keywords found - Query: {query_keywords}, Context: {context_keywords}")
-		
-		# If query contains course-specific terms and we find matches in context
-		if query_keywords > 0 and context_keywords > 0:
-			logger.info("Query contains course-specific terms with matching context")
+			logger.warning(f"Error computing semantic similarity: {e}. Falling back to out of scope.")
 			return {
-				"datasource": "local",
-				"reason": "Query matches course-specific concepts found in documents",
-				"sufficiency_score": 0.7,
-				"missing_information": False,
-				"query_complexity": 0.5
+				"datasource": "out_of_scope",
+				"reason": "Unable to determine if this topic is covered in the course materials",
+				"sufficiency_score": 0.0,
+				"missing_information": True,
+				"query_complexity": 0.5,
+				"needs_professor_assistance": True
 			}
-
-		# For potentially general queries, check context quality
-		prompt = """
-		Analyze if the following context from the course documents contains sufficient information 
-		to answer the query. Consider that even general-seeming questions might be addressed 
-		in the course materials from a numerical analysis perspective.
-
-		Query: {query}
-
-		Context: {context}
-
-		Evaluate and return a JSON object with:
-		{{
-			"datasource": "local" or "web_search",
-			"reason": <explanation for the decision>,
-			"sufficiency_score": <float 0.0-1.0>,
-			"missing_information": <boolean>,
-			"context_relevance": <string describing how context relates to query>,
-			"course_perspective": <boolean - true if query could be answered from course perspective>
-		}}
-
-		Consider:
-		1. Does the context contain relevant information, even if the query seems general?
-		2. Could this query be answered from a numerical analysis perspective using the context?
-		3. Is the information in context sufficient for a course-appropriate response?
-		4. Would web search actually provide better course-relevant information?
-		"""
-
-		messages = [
-			{"role": "system", "content": "You are an expert at evaluating context relevance for numerical analysis course content."},
-			{"role": "user", "content": prompt.format(query=query, context=context[:5000])}
-		]
-
-		try:
-			result = self.llm.invoke(messages).content.strip()
-			
-			# Extract JSON if it's embedded in other text
-			import re
-			json_match = re.search(r'({.*})', result, re.DOTALL)
-			if json_match:
-				result = json_match.group(1)
-				
-			evaluation = json.loads(result)
-			
-			# If the context suggests we can answer from a course perspective, use local
-			if evaluation.get("course_perspective", False):
-				logger.info("Query can be answered from course perspective using local documents")
-				return {
-					"datasource": "local",
-					"reason": "Can provide course-relevant answer from documents",
-					"sufficiency_score": evaluation.get("sufficiency_score", 0.7),
-					"missing_information": False,
-					"query_complexity": 0.5
-				}
-				
-			# If context is somewhat relevant but might need supplementing
-			if evaluation.get("sufficiency_score", 0) > 0.3:
-				logger.info("Using local documents with possible web supplementation")
-				return {
-					"datasource": "local",
-					"reason": "Using course materials with potential web supplementation",
-					"sufficiency_score": evaluation.get("sufficiency_score", 0.5),
-					"missing_information": evaluation.get("missing_information", True),
-					"query_complexity": 0.5
-				}
-
-		except Exception as e:
-			logger.warning(f"Error in context evaluation: {e}")
-
-		# Default to web search if we can't confidently use local documents
-		return {
-			"datasource": "web_search",
-			"reason": "Query requires information beyond course materials",
-			"sufficiency_score": 0.2,
-			"missing_information": True,
-			"query_complexity": 0.5
-		}
 
 
 	def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
@@ -1338,17 +1320,25 @@ class AgenticRetrieval(RAG_Pipeline):
 
 	async def invoke(self, query: str) -> Dict[str, Any]:
 		"""
-		Process a query using the RAG pipeline with adaptive retrieval.
-   	 
+		Process a query using the RAG pipeline with the following flow:
+		Your task is to decide how to best answer a user's question. The process begins by first considering the subject matter of the query. 
+		Specifically, you need to determine if the question falls within the domain of numerical analysis. If, upon examination, you find that 
+		the query is not related to numerical analysis, then the appropriate course of action is to perform a web search to find the answer. 
+		However, if you determine that the query does indeed pertain to the field of numerical analysis, the next step is to consult a local 
+		vector store containing relevant documents. Within this vector store, you must search for contextual information that can directly 
+		answer the user's question. If, after searching the vector store, no suitable context is found, you should return a message indicating 
+		that the query is out of scope for the local documents. Conversely, if relevant contextual information is successfully retrieved from 
+		the vector store, you should then use this local information to formulate your answer and return the local result to the user.
+		
 		Args:
 			query: The user query to process
-	   	 
+			
 		Returns:
 			A dictionary containing the answer and metadata
 		"""
 		try:
 			# First, check if query is out of domain
-			classification = self.adaptive_rag_handler.classify_query(query)  # Remove await
+			classification = self.adaptive_rag_handler.classify_query(query)
 			query_type = classification.get('query_type', 'factual')
 			is_out_of_domain = classification.get('is_out_of_domain', False)
 			
@@ -1359,7 +1349,7 @@ class AgenticRetrieval(RAG_Pipeline):
 				logger.info("Query is out of domain, using web search directly")
 				if self.web_search_agent and (not self.test_mode or self.enable_web_search_in_test_mode):
 					web_results = await self.web_search_agent.search(query)
-					if isinstance(web_results, dict):  # Check if web_results is a dictionary
+					if isinstance(web_results, dict):
 						return {
 							'answer': web_results.get('answer', 'No answer found'),
 							'sources': web_results.get('sources', []),
@@ -1369,13 +1359,6 @@ class AgenticRetrieval(RAG_Pipeline):
 								'routing_reason': 'Query is out of domain',
 								'web_sources': web_results.get('sources', []),
 								'local_sources': []
-							},
-							'evaluation': {
-								'context_sufficiency': 1.0,
-								'faithfulness': 1.0,
-								'completeness': 1.0,
-								'hallucination': 0.15,  # Base hallucination score for web results
-								'confidence': 0.85
 							}
 						}
 					else:
@@ -1384,25 +1367,17 @@ class AgenticRetrieval(RAG_Pipeline):
 							'answer': "Sorry, I encountered an error processing web search results.",
 							'sources': [],
 							'web_search_used': False,
-							'web_search_triggered': True,
-							'evaluation': None
+							'web_search_triggered': True
 						}
 				else:
 					return {
 						'answer': "I apologize, but this query appears to be outside my domain of expertise (numerical analysis and related topics). I can only provide accurate information about topics covered in the lecture notes and related mathematical concepts.",
 						'sources': [],
 						'web_search_used': False,
-						'web_search_triggered': False,
-						'evaluation': {
-							'context_sufficiency': 0.0,
-							'faithfulness': 1.0,
-							'completeness': 0.0,
-							'hallucination': 0.0,
-							'confidence': 1.0
-						}
+						'web_search_triggered': False
 					}
 
-			# For in-domain queries or when web search is disabled, proceed with normal RAG pipeline
+			# For in-domain queries, proceed with normal RAG pipeline
 			if self.rewrite_query:
 				rewritten_query = self.rewrite_user_query(query)
 				logger.info(f"Rewritten query: {rewritten_query}")
@@ -1414,94 +1389,52 @@ class AgenticRetrieval(RAG_Pipeline):
 			
 			if not docs:
 				logger.warning("No relevant documents found")
-				if self.web_search_enabled and (not self.test_mode or self.enable_web_search_in_test_mode):
-					logger.info("Falling back to web search due to no relevant documents")
-					web_results = await self.web_search_agent.search(query)
-					if isinstance(web_results, dict):
-						return {
-							'answer': web_results.get('answer', 'No answer found'),
-							'sources': web_results.get('sources', []),
-							'web_search_used': True,
-							'web_search_triggered': True,
-							'web_search_info': {
-								'routing_reason': 'No relevant local documents found',
-								'web_sources': web_results.get('sources', []),
-								'local_sources': []
-							}
-						}
-					else:
-						return {
-							'answer': "Sorry, I encountered an error processing web search results.",
-							'sources': [],
-							'web_search_used': False,
-							'web_search_triggered': True
-						}
-				else:
-					return {
-						'answer': "I couldn't find any relevant information to answer your question.",
-						'sources': [],
-						'web_search_used': False,
-						'web_search_triggered': False
-					}
+				return {
+					'answer': "I couldn't find any relevant information about this topic in the course materials. This topic may be out of scope for the current course. If you'd like to learn more about this specific topic in numerical analysis, you might want to discuss it with the professor during office hours or after class. Would you like the professor to help you with this topic?",
+					'sources': [],
+					'web_search_used': False,
+					'web_search_triggered': False,
+					'needs_professor_assistance': True
+				}
 
 			# Format context from retrieved documents
 			context = "\n\n".join([doc.page_content for doc in docs])
 			
-			# Route the query to determine if web search is needed
+			# Route the query to determine if the content is in scope
 			routing_decision = self.route_query(query, context)
 			
-			# If web search is needed and enabled
-			if (routing_decision['datasource'] == 'web_search' and 
-				self.web_search_enabled and 
-				(not self.test_mode or self.enable_web_search_in_test_mode)):
-				
-				web_results = self.web_search_agent.search(query)
-				if not isinstance(web_results, dict):
-					logger.error(f"Unexpected web search results format: {type(web_results)}")
-					web_results = {'answer': 'No answer found', 'context': '', 'sources': []}
-				
-				# Combine web results with local context
-				combined_context = f"{context}\n\n=== WEB SEARCH RESULTS ===\n\n{web_results.get('context', '')}"
-				
-				# Generate answer using combined context
-				answer = self.generate_answer(
-					query, 
-					combined_context,
-					web_search_info={
-						'web_search_used': True,
-						'web_sources': web_results.get('sources', []),
-						'local_sources': [doc.metadata.get('source', 'unknown') for doc in docs]
-					}
-				)
-				
+			# Handle out of scope content
+			if routing_decision['datasource'] == 'out_of_scope':
 				return {
-					'answer': answer,
-					'sources': web_results.get('sources', []) + [doc.metadata.get('source', 'unknown') for doc in docs],
-					'web_search_used': True,
-					'web_search_triggered': True,
-					'web_search_info': {
-						'routing_reason': routing_decision['reason'],
-						'web_sources': web_results.get('sources', []),
-						'local_sources': [doc.metadata.get('source', 'unknown') for doc in docs]
-					}
-				}
-			else:
-				# Generate answer using only local context
-				answer = self.generate_answer(query, context)
-				
-				# Evaluate the answer if enabled
-				if self.evaluate and not self.test_mode:
-					evaluation = self.evaluate_answer(query, context, answer)
-				else:
-					evaluation = None
-				
-				return {
-					'answer': answer,
-					'sources': [doc.metadata.get('source', 'unknown') for doc in docs],
+					'answer': "This topic appears to be out of scope for the current course materials. While it's related to numerical analysis, we don't have sufficient coverage of this specific topic in the course documents. If you're interested in learning more about this topic, I recommend discussing it with the professor during office hours or after class. They can provide guidance on whether this topic will be covered later in the course or suggest additional resources. Would you like the professor to help you with this topic?",
+					'sources': [],
 					'web_search_used': False,
 					'web_search_triggered': False,
-					'evaluation': evaluation
+					'web_search_info': {
+						'routing_reason': routing_decision['reason'],
+						'web_sources': [],
+						'local_sources': []
+					},
+					'needs_professor_assistance': True
 				}
+			
+			# Generate answer using local context
+			answer = self.generate_answer(query, context)
+			
+			# Evaluate the answer if enabled
+			if self.evaluate and not self.test_mode:
+				evaluation = self.evaluate_answer(query, context, answer)
+			else:
+				evaluation = None
+			
+			return {
+				'answer': answer,
+				'sources': [doc.metadata.get('source', 'unknown') for doc in docs],
+				'web_search_used': False,
+				'web_search_triggered': False,
+				'evaluation': evaluation,
+				'needs_professor_assistance': False
+			}
 				
 		except Exception as e:
 			logger.error(f"Error processing query: {str(e)}", exc_info=True)
@@ -1510,7 +1443,8 @@ class AgenticRetrieval(RAG_Pipeline):
 				'sources': [],
 				'web_search_used': False,
 				'web_search_triggered': False,
-				'evaluation': None
+				'evaluation': None,
+				'needs_professor_assistance': False
 			}
 
 
