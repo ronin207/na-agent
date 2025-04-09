@@ -4,6 +4,8 @@ import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import logging
+import threading
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +51,46 @@ def send_message(channel_id, message, response_type='in_channel'):
         logger.error(f"Error sending message to Mattermost: {str(e)}")
         raise
 
+def show_typing(channel_id):
+    """Show typing indicator in a Mattermost channel"""
+    headers = {
+        'Authorization': f'Bearer {BOT_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    
+    try:
+        response = requests.post(
+            f'{MATTERMOST_URL}/api/v4/users/me/typing',
+            headers=headers,
+            json={'channel_id': channel_id}
+        )
+        response.raise_for_status()
+        return response.json() if response.content else None
+    except Exception as e:
+        logger.error(f"Error showing typing indicator: {str(e)}")
+        return None
+
+def show_typing_continuous(channel_id, stop_event):
+    """Show typing indicator continuously in a Mattermost channel until stop_event is set"""
+    headers = {
+        'Authorization': f'Bearer {BOT_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    
+    while not stop_event.is_set():
+        try:
+            response = requests.post(
+                f'{MATTERMOST_URL}/api/v4/users/me/typing',
+                headers=headers,
+                json={'channel_id': channel_id}
+            )
+            response.raise_for_status()
+            # Sleep for 3 seconds before sending the next typing indicator
+            time.sleep(3)
+        except Exception as e:
+            logger.error(f"Error showing typing indicator: {str(e)}")
+            break
+
 def process_query(text, channel_id, user_name):
     """Process a query and return the response"""
     if not text or text.lower() == 'help':
@@ -62,30 +104,48 @@ def process_query(text, channel_id, user_name):
         send_message(channel_id, help_message)
         return jsonify({'response_type': 'in_channel'})
 
-    # Send initial response
-    send_message(channel_id, "Processing your query...", response_type='ephemeral')
-
     try:
-        # Forward the query to the RAG pipeline
-        response = requests.post(
-            'http://localhost:5001/query',
-            json={'text': text},
-            timeout=30
+        # Create a stop event for the typing indicator thread
+        stop_typing = threading.Event()
+        
+        # Start the typing indicator in a separate thread
+        typing_thread = threading.Thread(
+            target=show_typing_continuous,
+            args=(channel_id, stop_typing)
         )
-        response.raise_for_status()
-        response_data = response.json()
+        typing_thread.daemon = True  # Make the thread daemon so it exits when the main thread exits
+        typing_thread.start()
 
-        # Format the message
-        formatted_message = (
-            f"**Question from @{user_name}**:\n"
-            f"{text}\n\n"
-            f"**Answer**:\n"
-            f"{response_data['text']}"
-        )
+        try:
+            # Forward the query to the RAG pipeline
+            response = requests.post(
+                'http://localhost:5001/query',
+                json={'text': text},
+                timeout=30
+            )
+            response.raise_for_status()
+            response_data = response.json()
 
-        # Send the formatted message
-        send_message(channel_id, formatted_message)
-        return jsonify({'response_type': 'in_channel'})
+            # Format the message
+            formatted_message = (
+                f"**Question from @{user_name}**:\n"
+                f"{text}\n\n"
+                f"**Answer**:\n"
+                f"{response_data['text']}"
+            )
+
+            # Stop the typing indicator
+            stop_typing.set()
+            typing_thread.join(timeout=1)  # Wait for the typing thread to finish
+
+            # Send the formatted message
+            send_message(channel_id, formatted_message)
+            return jsonify({'response_type': 'in_channel'})
+
+        finally:
+            # Ensure we stop the typing indicator even if an error occurs
+            stop_typing.set()
+            typing_thread.join(timeout=1)
 
     except requests.exceptions.RequestException as e:
         error_message = f"Error processing query: {str(e)}"
