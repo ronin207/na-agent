@@ -57,10 +57,34 @@ def query():
             return jsonify({'error': 'No text provided'}), 400
         
         query_text = data['text']
-        logger.info(f"Received query: {query_text}")
+        if isinstance(query_text, dict):
+            # If query_text is a dictionary, extract the actual text
+            query_text = query_text.get('text', '')
         
-        # Process the query
-        result = asyncio.run(rag_pipeline.invoke(query_text))
+        # Ensure query_text is a string
+        query_text = str(query_text).strip()
+        
+        logger.info(f"Processing query: {query_text}")
+        
+        if not query_text:
+            return jsonify({'error': 'Empty query text'}), 400
+        
+        # Add style instructions to the query
+        style_instructions = {
+            "query": query_text,  # Changed from 'text' to 'query' to match expected format
+            "style_guide": """
+            Please provide answers that:
+            1. Match the style and complexity level of the lecture notes used in the course: Foundations of Numerical Analysis and Exercises in Numerical Analysis
+            2. Use clear, concise explanations without unnecessary technical jargon
+            3. Include relevant examples when helpful
+            4. Break down complex concepts into digestible parts
+            5. Focus on fundamental understanding rather than advanced details
+            6. Use mathematical notation only when necessary and with clear explanation
+            """
+        }
+        
+        # Process the query with style instructions
+        result = asyncio.run(rag_pipeline.invoke(query_text))  # Pass query_text directly
         
         # Format response for Mattermost
         answer = result['answer']
@@ -79,9 +103,9 @@ def query():
                     unique_sources.append(source_name)
             
             if unique_sources:
-                sources_text = "\n\n**Sources:**\n" + "\n".join([f"- {source}" for source in unique_sources[:3]])
-                if len(unique_sources) > 3:
-                    sources_text += f"\n- ... and {len(unique_sources) - 3} more sources"
+                sources_text = "\n\n**Sources:**\n" + "\n".join([f"- {source}" for source in unique_sources[:2]])
+                if len(unique_sources) > 2:
+                    sources_text += f"\n- ... and {len(unique_sources) - 2} more sources"
                 answer += sources_text
         
         # Add web search notification if applicable
