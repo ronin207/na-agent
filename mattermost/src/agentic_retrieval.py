@@ -29,6 +29,8 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import HumanMessagePromptTemplate, SystemMessagePromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
+from pypdf import PdfReader
+import re
 
 # Define prompts directly in this file to avoid external dependencies
 QUERY_REWRITING_PROMPT = """
@@ -469,16 +471,59 @@ class AgenticRetrieval(RAG_Pipeline):
 
 	async def load_documents(self) -> List[Document]:
 		logger.info(f"Loading documents from {self.pdf_folder}")
-   	 
+		
 		if not self.pdf_folder or not os.path.exists(self.pdf_folder):
 			logger.warning(f"PDF folder {self.pdf_folder} does not exist")
 			return []
-   	 
+		
 		try:
-			loader = DirectoryLoader(self.pdf_folder, glob="**/*.pdf", loader_cls=PyPDFLoader)
-			documents = loader.load()
-			logger.info(f"Loaded {len(documents)} documents")
+			# First, try to identify PowerPoint-converted PDFs
+			ppt_pdfs = []
+			regular_pdfs = []
+			
+			for file in os.listdir(self.pdf_folder):
+				if file.endswith('.pdf'):
+					file_path = os.path.join(self.pdf_folder, file)
+					# Simple heuristic to identify PowerPoint-converted PDFs
+					# They often have "Slide" in the text or specific formatting
+					try:
+						reader = PdfReader(file_path)
+						first_page = reader.pages[0].extract_text()
+						if "Slide" in first_page or "PowerPoint" in first_page:
+							ppt_pdfs.append(file_path)
+						else:
+							regular_pdfs.append(file_path)
+					except Exception as e:
+						logger.warning(f"Error checking PDF type for {file}: {e}")
+						regular_pdfs.append(file_path)
+			
+			documents = []
+			
+			# Load PowerPoint-converted PDFs with our custom loader
+			for ppt_pdf in ppt_pdfs:
+				try:
+					loader = PowerPointPDFLoader(ppt_pdf)
+					docs = loader.load()
+					documents.extend(docs)
+					logger.info(f"Loaded {len(docs)} pages from PowerPoint-converted PDF: {ppt_pdf}")
+				except Exception as e:
+					logger.error(f"Error loading PowerPoint-converted PDF {ppt_pdf}: {e}")
+			
+			# Load regular PDFs with PyPDFLoader
+			if regular_pdfs:
+				loader = DirectoryLoader(
+					self.pdf_folder,
+					glob="**/*.pdf",
+					loader_cls=PyPDFLoader,
+					use_multithreading=True
+				)
+				docs = loader.load()
+				documents.extend(docs)
+				logger.info(f"Loaded {len(docs)} pages from regular PDFs")
+			
+			logger.info(f"Total documents loaded: {len(documents)}")
 			return documents
+			
 		except Exception as e:
 			logger.error(f"Error loading documents: {e}")
 			return []
@@ -1643,6 +1688,54 @@ class AgenticRetrieval(RAG_Pipeline):
 		)
    	 
 		return chain
+
+class PowerPointPDFLoader:
+    """Custom PDF loader optimized for PowerPoint-converted PDFs"""
+    
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        
+    def load(self) -> List[Document]:
+        """Load and process the PDF file"""
+        documents = []
+        reader = PdfReader(self.file_path)
+        
+        for page_num, page in enumerate(reader.pages):
+            # Extract text from the page
+            text = page.extract_text()
+            
+            # Clean and format the text
+            text = self._clean_text(text)
+            
+            # Create a document with metadata
+            doc = Document(
+                page_content=text,
+                metadata={
+                    "source": self.file_path,
+                    "page": page_num + 1,
+                    "file_type": "powerpoint_pdf"
+                }
+            )
+            documents.append(doc)
+            
+        return documents
+    
+    def _clean_text(self, text: str) -> str:
+        """Clean and format the text from PowerPoint-converted PDFs"""
+        # Remove multiple newlines
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        
+        # Remove page numbers and headers/footers
+        text = re.sub(r'Page \d+ of \d+', '', text)
+        text = re.sub(r'\d+/\d+', '', text)
+        
+        # Remove bullet points and numbering
+        text = re.sub(r'^[\s•\-\d\.]+', '', text, flags=re.MULTILINE)
+        
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text
 
 if __name__ == "__main__":
 	import asyncio
