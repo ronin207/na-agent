@@ -32,6 +32,8 @@ from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
 from pypdf import PdfReader
 import re
 
+from .semantic_cache import SemanticCache
+
 # Define prompts directly in this file to avoid external dependencies
 QUERY_REWRITING_PROMPT = """
 You are an expert at reformulating queries to improve retrieval performance, especially for technical and mathematical topics.
@@ -319,6 +321,9 @@ class AgenticRetrieval(RAG_Pipeline):
 		web_search_engine: str = 'openai',
 		enable_web_search_in_test_mode: bool = False,
 		max_history_length: int = 5,
+		cache_enabled: bool = True,
+		cache_similarity_threshold: float = 0.9,
+		max_cache_size: int = 1000,
 	):
 		os.environ['USER_AGENT'] = user_agent
 		
@@ -357,6 +362,17 @@ class AgenticRetrieval(RAG_Pipeline):
 		self.web_search_engine = web_search_engine
 		self.enable_web_search_in_test_mode = enable_web_search_in_test_mode
 		self.max_history_length = max_history_length
+		self.cache_enabled = cache_enabled
+		if self.cache_enabled:
+			self.semantic_cache = SemanticCache(
+				cache_file=os.path.join(os.path.dirname(__file__), "semantic_cache.json"),
+				similarity_threshold=cache_similarity_threshold,
+				max_cache_size=max_cache_size,
+				embedding_model=self.embedding_model,
+				vectorstore_path=self.persist_directory  # Pass the vectorstore path
+			)
+		else:
+			self.semantic_cache = None
    	 
 		# Initialize OpenAI models
 		self.llm = ChatOpenAI(
@@ -655,12 +671,13 @@ class AgenticRetrieval(RAG_Pipeline):
 			return False
 	
 	def update_vectorstore(self, documents: List[Document]) -> None:
+		"""Update the vectorstore with new documents"""
 		logger.info("Updating vector store")
-   	 
+		
 		if not documents:
 			logger.warning("No documents to update vector store")
 			return
-   	 
+		
 		try:
 			vector_store = FAISS.load_local(self.persist_directory, self.embeddings, allow_dangerous_deserialization=True)
 			
@@ -720,6 +737,11 @@ class AgenticRetrieval(RAG_Pipeline):
 			logger.info(f"Updated vector store with {len(new_documents)} new documents, total: {self.document_count}")
 			logger.info(f"Post-update document counts by source: {source_counts}")
 	   	 
+			# Clear the semantic cache when vectorstore is updated
+			if self.cache_enabled and self.semantic_cache:
+				logger.info("Clearing semantic cache due to vectorstore update")
+				self.semantic_cache.clear()
+			
 			# Re-initialize corrective_rag_handler with the updated retriever
 			if self.retriever is not None:
 				self.corrective_rag_handler = CorrectiveRAG(self.llm, self.retriever)
@@ -1320,23 +1342,16 @@ class AgenticRetrieval(RAG_Pipeline):
 
 	async def invoke(self, query: str) -> Dict[str, Any]:
 		"""
-		Process a query using the RAG pipeline with the following flow:
-		Your task is to decide how to best answer a user's question. The process begins by first considering the subject matter of the query. 
-		Specifically, you need to determine if the question falls within the domain of numerical analysis. If, upon examination, you find that 
-		the query is not related to numerical analysis, then the appropriate course of action is to perform a web search to find the answer. 
-		However, if you determine that the query does indeed pertain to the field of numerical analysis, the next step is to consult a local 
-		vector store containing relevant documents. Within this vector store, you must search for contextual information that can directly 
-		answer the user's question. If, after searching the vector store, no suitable context is found, you should return a message indicating 
-		that the query is out of scope for the local documents. Conversely, if relevant contextual information is successfully retrieved from 
-		the vector store, you should then use this local information to formulate your answer and return the local result to the user.
-		
-		Args:
-			query: The user query to process
-			
-		Returns:
-			A dictionary containing the answer and metadata
+		Process a query using the RAG pipeline with semantic caching.
 		"""
 		try:
+			# Check cache first if enabled
+			if self.cache_enabled and self.semantic_cache:
+				cached_response = self.semantic_cache.get(query)
+				if cached_response:
+					logger.info("Using cached response")
+					return cached_response
+
 			# First, check if query is out of domain
 			classification = self.adaptive_rag_handler.classify_query(query)
 			query_type = classification.get('query_type', 'factual')
@@ -1350,7 +1365,7 @@ class AgenticRetrieval(RAG_Pipeline):
 				if self.web_search_agent and (not self.test_mode or self.enable_web_search_in_test_mode):
 					web_results = await self.web_search_agent.search(query)
 					if isinstance(web_results, dict):
-						return {
+						result = {
 							'answer': web_results.get('answer', 'No answer found'),
 							'sources': web_results.get('sources', []),
 							'web_search_used': True,
@@ -1361,6 +1376,10 @@ class AgenticRetrieval(RAG_Pipeline):
 								'local_sources': []
 							}
 						}
+						# Cache the result
+						if self.cache_enabled and self.semantic_cache:
+							self.semantic_cache.put(query, result)
+						return result
 					else:
 						logger.error(f"Unexpected web search results format: {type(web_results)}")
 						return {
@@ -1370,12 +1389,16 @@ class AgenticRetrieval(RAG_Pipeline):
 							'web_search_triggered': True
 						}
 				else:
-					return {
+					result = {
 						'answer': "I apologize, but this query appears to be outside my domain of expertise (numerical analysis and related topics). I can only provide accurate information about topics covered in the lecture notes and related mathematical concepts.",
 						'sources': [],
 						'web_search_used': False,
 						'web_search_triggered': False
 					}
+					# Cache the result
+					if self.cache_enabled and self.semantic_cache:
+						self.semantic_cache.put(query, result)
+					return result
 
 			# For in-domain queries, proceed with normal RAG pipeline
 			if self.rewrite_query:
@@ -1389,13 +1412,17 @@ class AgenticRetrieval(RAG_Pipeline):
 			
 			if not docs:
 				logger.warning("No relevant documents found")
-				return {
-					'answer': "I couldn't find any relevant information about this topic in the course materials. This topic may be out of scope for the current course. If you'd like to learn more about this specific topic in numerical analysis, you might want to discuss it with the professor during office hours or after class. Would you like the professor to help you with this topic?",
+				result = {
+					'answer': "I couldn't find any relevant information about this topic in the course materials. This topic may be out of scope for the current course. If you'd like to learn more about this specific topic in numerical analysis, you might want to discuss it with the professor during office hours or after class.",
 					'sources': [],
 					'web_search_used': False,
 					'web_search_triggered': False,
 					'needs_professor_assistance': True
 				}
+				# Cache the result
+				if self.cache_enabled and self.semantic_cache:
+					self.semantic_cache.put(query, result)
+				return result
 
 			# Format context from retrieved documents
 			context = "\n\n".join([doc.page_content for doc in docs])
@@ -1405,8 +1432,8 @@ class AgenticRetrieval(RAG_Pipeline):
 			
 			# Handle out of scope content
 			if routing_decision['datasource'] == 'out_of_scope':
-				return {
-					'answer': "This topic appears to be out of scope for the current course materials. While it's related to numerical analysis, we don't have sufficient coverage of this specific topic in the course documents. If you're interested in learning more about this topic, I recommend discussing it with the professor during office hours or after class. They can provide guidance on whether this topic will be covered later in the course or suggest additional resources. Would you like the professor to help you with this topic?",
+				result = {
+					'answer': "This topic appears to be out of scope for the current course materials. While it's related to numerical analysis, we don't have sufficient coverage of this specific topic in the course documents. If you're interested in learning more about this topic, I recommend discussing it with the professor during office hours or after class. They can provide guidance on whether this topic will be covered later in the course or suggest additional resources.",
 					'sources': [],
 					'web_search_used': False,
 					'web_search_triggered': False,
@@ -1417,6 +1444,10 @@ class AgenticRetrieval(RAG_Pipeline):
 					},
 					'needs_professor_assistance': True
 				}
+				# Cache the result
+				if self.cache_enabled and self.semantic_cache:
+					self.semantic_cache.put(query, result)
+				return result
 			
 			# Generate answer using local context
 			answer = self.generate_answer(query, context)
@@ -1427,7 +1458,7 @@ class AgenticRetrieval(RAG_Pipeline):
 			else:
 				evaluation = None
 			
-			return {
+			result = {
 				'answer': answer,
 				'sources': [doc.metadata.get('source', 'unknown') for doc in docs],
 				'web_search_used': False,
@@ -1435,6 +1466,12 @@ class AgenticRetrieval(RAG_Pipeline):
 				'evaluation': evaluation,
 				'needs_professor_assistance': False
 			}
+			
+			# Cache the result
+			if self.cache_enabled and self.semantic_cache:
+				self.semantic_cache.put(query, result)
+			
+			return result
 				
 		except Exception as e:
 			logger.error(f"Error processing query: {str(e)}", exc_info=True)
@@ -1713,7 +1750,10 @@ if __name__ == "__main__":
 			web_search_enabled=web_search_enabled,
 			web_search_threshold=0.6,
 			enable_web_search_in_test_mode=enable_web_test,
-			max_history_length=5
+			max_history_length=5,
+			cache_enabled=True,
+			cache_similarity_threshold=0.9,
+			max_cache_size=1000,
 		)
    	 
 		print("Setting up the RAG pipeline...")
