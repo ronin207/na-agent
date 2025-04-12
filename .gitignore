@@ -55,6 +55,9 @@ data/
 *.sqlite
 *.sqlite3
 
+# Cache files
+*.json
+
 # API keys and sensitive data
 *.pem
 *.key
