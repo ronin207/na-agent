@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ngrok.mattermost</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/ngrok</string>
+        <string>start</string>
+        <string>--log=stdout</string>
+        <string>--log-level=debug</string>
+        <string>mattermost-bot</string>
+        <string>--config=/Users/takumiotsuka/Documents/Projects/personal/na-agent-main/ngrok.yml</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/takumiotsuka/Documents/Projects/personal/na-agent-main/logs/ngrok.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/takumiotsuka/Documents/Projects/personal/na-agent-main/logs/ngrok.log</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/takumiotsuka/Documents/Projects/personal/na-agent-main</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist> 
