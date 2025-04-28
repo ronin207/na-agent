@@ -122,3 +122,7 @@ mattermost/chroma_db/index.faiss
 
 # Environment variable files
 *.yml
+
+# New additions
+*.plist
+*.sh
