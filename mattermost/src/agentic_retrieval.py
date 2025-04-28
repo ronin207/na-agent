@@ -36,6 +36,7 @@ from .semantic_cache import SemanticCache
 from llama_cloud_services import LlamaParse
 from llama_index.core import SimpleDirectoryReader
 from .jupyter_parser import JupyterParser
+from .youtube_processor import YouTubeProcessor
 
 # Define prompts directly in this file to avoid external dependencies
 QUERY_REWRITING_PROMPT = """
@@ -515,6 +516,8 @@ class AgenticRetrieval(RAG_Pipeline):
 			chunk_size=self.chunk_size,
 				chunk_overlap=self.chunk_overlap,
 		)
+
+		self.youtube_processor = YouTubeProcessor()
 
 	async def load_documents(self) -> List[Document]:
 		logger.info(f"Loading documents from {self.pdf_folder}")
@@ -1363,150 +1366,87 @@ class AgenticRetrieval(RAG_Pipeline):
 		return self.corrective_rag_handler.corrective(query, original_context, original_answer, evaluation_results, self_rag_results)
 
 
-	async def invoke(self, query: str) -> Dict[str, Any]:
+	async def invoke(self, query: str, video_url: str = None) -> Dict[str, Any]:
 		"""
-		Process a query using the RAG pipeline with semantic caching.
+		Process a query, now with optional YouTube video support.
+		
+		Args:
+			query: The user's query
+			video_url: Optional YouTube video URL
+			
+		Returns:
+			Dictionary containing the answer and other metadata
 		"""
 		try:
-			# Check cache first if enabled
-			if self.cache_enabled and self.semantic_cache:
-				cached_response = self.semantic_cache.get(query)
-				if cached_response:
-					logger.info("Using cached response")
-					return cached_response
-
-			# First, check if query is out of domain
-			classification = self.adaptive_rag_handler.classify_query(query)
-			query_type = classification.get('query_type', 'factual')
-			is_out_of_domain = classification.get('is_out_of_domain', False)
-			
-			logger.info(f"Query classification: {query_type}, Out of domain: {is_out_of_domain}")
-			
-			# If query is out of domain and web search is enabled, use web search directly
-			if is_out_of_domain and self.web_search_enabled:
-				logger.info("Query is out of domain, using web search directly")
-				if self.web_search_agent and (not self.test_mode or self.enable_web_search_in_test_mode):
-					web_results = await self.web_search_agent.search(query)
-					if isinstance(web_results, dict):
-						result = {
-							'answer': web_results.get('answer', 'No answer found'),
-							'sources': web_results.get('sources', []),
-							'web_search_used': True,
-							'web_search_triggered': True,
-							'web_search_info': {
-								'routing_reason': 'Query is out of domain',
-								'web_sources': web_results.get('sources', []),
-								'local_sources': []
-							}
-						}
-						# Cache the result
-						if self.cache_enabled and self.semantic_cache:
-							self.semantic_cache.put(query, result)
-						return result
-					else:
-						logger.error(f"Unexpected web search results format: {type(web_results)}")
+			# If video URL is provided, process as a YouTube query
+			if video_url:
+				result = self.process_youtube_query(query, video_url)
 						return {
-							'answer': "Sorry, I encountered an error processing web search results.",
-							'sources': [],
+					'answer': result['answer'],
+					'sources': [result['video_url']],
 							'web_search_used': False,
-							'web_search_triggered': True
-						}
-				else:
-					result = {
-						'answer': "I apologize, but this query appears to be outside my domain of expertise (numerical analysis and related topics). I can only provide accurate information about topics covered in the lecture notes and related mathematical concepts.",
-						'sources': [],
-						'web_search_used': False,
-						'web_search_triggered': False
+					'web_search_triggered': False,
+					'evaluation': None,
+					'needs_professor_assistance': False
 					}
-					# Cache the result
-					if self.cache_enabled and self.semantic_cache:
-						self.semantic_cache.put(query, result)
-					return result
-
-			# For in-domain queries, proceed with normal RAG pipeline
-			if self.rewrite_query:
-				rewritten_query = self.rewrite_user_query(query)
-				logger.info(f"Rewritten query: {rewritten_query}")
-			else:
-				rewritten_query = query
-
-			# Retrieve relevant documents
-			docs = self.retrieve_documents(rewritten_query)
 			
-			if not docs:
-				logger.warning("No relevant documents found")
-				result = {
-					'answer': "I couldn't find any relevant information about this topic in the course materials. This topic may be out of scope for the current course. If you'd like to learn more about this specific topic in numerical analysis, you might want to discuss it with the professor during office hours or after class.",
-					'sources': [],
-					'web_search_used': False,
-					'web_search_triggered': False,
-					'needs_professor_assistance': True
-				}
-				# Cache the result
-				if self.cache_enabled and self.semantic_cache:
-					self.semantic_cache.put(query, result)
-				return result
-
-			# Format context from retrieved documents
-			context = "\n\n".join([doc.page_content for doc in docs])
+			# Otherwise, process normally
+			return await super().invoke(query)
 			
-			# Route the query to determine if the content is in scope
-			routing_decision = self.route_query(query, context)
-			
-			# Handle out of scope content
-			if routing_decision['datasource'] == 'out_of_scope':
-				result = {
-					'answer': "This topic appears to be out of scope for the current course materials. While it's related to numerical analysis, we don't have sufficient coverage of this specific topic in the course documents. If you're interested in learning more about this topic, I recommend discussing it with the professor during office hours or after class. He can provide guidance on whether this topic will be covered later in the course or suggest additional resources.",
-					'sources': [],
-					'web_search_used': False,
-					'web_search_triggered': False,
-					'web_search_info': {
-						'routing_reason': routing_decision['reason'],
-						'web_sources': [],
-						'local_sources': []
-					},
-					'needs_professor_assistance': True
-				}
-				# Cache the result
-				if self.cache_enabled and self.semantic_cache:
-					self.semantic_cache.put(query, result)
-				return result
-			
-			# Generate answer using local context
-			answer = self.generate_answer(query, context)
-			
-			# Evaluate the answer if enabled
-			if self.evaluate and not self.test_mode:
-				evaluation = self.evaluate_answer(query, context, answer)
-			else:
-				evaluation = None
-			
-			result = {
-				'answer': answer,
-				'sources': [doc.metadata.get('source', 'unknown') for doc in docs],
-				'web_search_used': False,
-				'web_search_triggered': False,
-				'evaluation': evaluation,
-				'needs_professor_assistance': False
-			}
-			
-			# Cache the result
-			if self.cache_enabled and self.semantic_cache:
-				self.semantic_cache.put(query, result)
-			
-			return result
-				
 		except Exception as e:
-			logger.error(f"Error processing query: {str(e)}", exc_info=True)
+			logger.error(f"Error in invoke: {e}")
 			return {
 				'answer': f"Error processing query: {str(e)}",
-				'sources': [],
-				'web_search_used': False,
-				'web_search_triggered': False,
+					'sources': [],
+					'web_search_used': False,
+					'web_search_triggered': False,
 				'evaluation': None,
 				'needs_professor_assistance': False
 			}
 
+	def process_youtube_query(self, query: str, video_url: str) -> Dict[str, Any]:
+		"""
+		Process a query specifically for a YouTube video.
+		
+		Args:
+			query: User's query about the video content
+			video_url: URL of the YouTube video
+			
+		Returns:
+			Dictionary containing answer and relevant video segments
+		"""
+		try:
+			# Process the video and find relevant segments
+			segments, error = self.youtube_processor.process_video(video_url, query)
+			
+			if error:
+				return {
+					'answer': f"Error processing video: {error}",
+					'segments': [],
+					'video_url': video_url
+				}
+			
+			# Format the response
+			response = []
+			for segment in segments:
+				timestamp_link = f"{video_url}{segment['url_time']}"
+				response.append(f"At {segment['timestamp']}: {segment['text']} [Link]({timestamp_link})")
+			
+			answer = "\n\nRelevant segments from the video:\n\n" + "\n\n".join(response)
+			
+			return {
+				'answer': answer,
+				'segments': segments,
+				'video_url': video_url
+			}
+				
+		except Exception as e:
+			logger.error(f"Error processing YouTube query: {e}")
+			return {
+				'answer': f"Error processing video: {str(e)}",
+				'segments': [],
+				'video_url': video_url
+			}
 
 	def chat(self, query: str) -> Dict[str, Any]:
 		"""
