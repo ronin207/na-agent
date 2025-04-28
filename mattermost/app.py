@@ -8,6 +8,7 @@ import logging
 from dotenv import load_dotenv
 import asyncio
 from contextlib import asynccontextmanager
+from flask import request, jsonify
 
 # Add the project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -113,6 +114,41 @@ async def process_query(query: QueryRequest):
         logger.error(f"Error processing query: {str(e)}")
         logger.exception("Full exception details:")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.route('/query', methods=['POST'])
+def query():
+    try:
+        data = request.get_json()
+        if not data or 'text' not in data:
+            return jsonify({'error': 'No query provided'}), 400
+        
+        query_text = data['text']
+        video_url = data.get('video_url')  # Get video URL if provided
+        
+        # Process the query
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # Call invoke with video_url if provided
+            result = loop.run_until_complete(rag_pipeline.invoke(query_text, video_url))
+            
+            # Format the response
+            response = result.get('answer', 'No answer found')
+            
+            return jsonify({
+                'response': response,
+                'sources': result.get('sources', []),
+                'web_search_used': result.get('web_search_used', False),
+                'web_search_triggered': result.get('web_search_triggered', False)
+            })
+            
+        finally:
+            loop.close()
+            
+    except Exception as e:
+        logger.error(f"Error processing query: {e}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == "__main__":
     # Verify environment variables
