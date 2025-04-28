@@ -5,8 +5,10 @@ import threading
 import requests
 from threading import Event
 from flask import Flask, request, jsonify
-from websocket import WebSocketApp
+import websocket
 import time
+import re
+from typing import Optional
 
 # Configure logging
 logging.basicConfig(
@@ -38,15 +40,15 @@ def connect_websocket():
     
     def on_message(ws, message):
         logger.debug(f"Received WebSocket message: {message}")
-    
+
     def on_error(ws, error):
         logger.error(f"WebSocket error: {error}")
-    
+
     def on_close(ws, close_status_code, close_msg):
         logger.warning(f"WebSocket closed: {close_status_code} - {close_msg}")
         time.sleep(5)  # Wait before reconnecting
         connect_websocket()
-    
+
     def on_open(ws):
         logger.info("WebSocket connection established")
         # Authenticate with the WebSocket
@@ -58,9 +60,9 @@ def connect_websocket():
             }
         }
         ws.send(json.dumps(auth_message))
-    
+
     # Create and start WebSocket connection
-    ws = WebSocketApp(
+    ws = websocket.WebSocketApp(
         ws_url,
         on_message=on_message,
         on_error=on_error,
@@ -77,14 +79,14 @@ def send_message(channel_id, message, response_type='in_channel', root_id=None):
             'Authorization': f'Bearer {BOT_TOKEN}',
             'Content-Type': 'application/json'
         }
-        
+    
         # Prepare the message data
         data = {
             'channel_id': channel_id,
             'message': message,
             'root_id': root_id if root_id else None
         }
-        
+    
         # Remove root_id if it's None to avoid API errors
         if data['root_id'] is None:
             del data['root_id']
@@ -122,15 +124,34 @@ def show_typing(channel_id):
         )
         
         response.raise_for_status()
+        logger.debug(f"Successfully showed typing indicator in channel {channel_id}")
         
     except requests.exceptions.RequestException as e:
         logger.error(f"Error showing typing indicator: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response status code: {e.response.status_code}")
+            logger.error(f"Response text: {e.response.text}")
 
 def show_typing_continuous(channel_id, stop_event):
     """Continuously show typing indicator until stop_event is set"""
     while not stop_event.is_set():
         show_typing(channel_id)
         time.sleep(2)  # Show typing every 2 seconds
+
+def extract_youtube_url(text: str) -> Optional[str]:
+    """Extract YouTube URL from text if present."""
+    youtube_patterns = [
+        r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be)\/(?:watch\?v=)?([^\s&]+)',
+        r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com)\/(?:v|embed)\/([^\s&]+)',
+        r'(?:https?:\/\/)?(?:www\.)?(?:youtu\.be)\/([^\s&]+)'
+    ]
+    
+    for pattern in youtube_patterns:
+        match = re.search(pattern, text)
+        if match:
+            # Return the full matched URL
+            return match.group(0)
+    return None
 
 def process_query(text, channel_id, user_name, root_id=None):
     """Process a query and return the response"""
@@ -148,14 +169,28 @@ def process_query(text, channel_id, user_name, root_id=None):
             args=(channel_id, stop_typing)
         )
         typing_thread.start()
-        
+
         try:
+            # Check for YouTube URL in the query
+            youtube_url = extract_youtube_url(text)
+            
             # Prepare the request data
             request_data = {
                 'text': text,
                 'user': user_name,
                 'channel_id': channel_id
             }
+            
+            # If YouTube URL is found, add it to the request
+            if youtube_url:
+                # Remove the URL from the query text
+                query_text = text.replace(youtube_url, '').strip()
+                if not query_text:
+                    send_message(channel_id, "Please provide a question about the video content.", root_id=root_id)
+                    return jsonify({'response_type': 'in_channel'})
+                
+                request_data['text'] = query_text
+                request_data['video_url'] = youtube_url
             
             logger.info(f"Sending request to RAG pipeline: {json.dumps(request_data)}")
             
@@ -188,22 +223,20 @@ def process_query(text, channel_id, user_name, root_id=None):
             
             return jsonify({'response_type': 'in_channel'})
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error making request to RAG pipeline: {str(e)}")
-            error_message = "I apologize, but I'm having trouble processing your request right now. Please try again in a moment."
-            send_message(channel_id, error_message, root_id=root_id)
-            return jsonify({'response_type': 'in_channel'})
-            
+        except requests.Timeout:
+            send_message(channel_id, "The query took too long to process. Please try again with a simpler query.")
+        except requests.RequestException as e:
+            logger.error(f"Error making request to RAG pipeline: {e}")
+            send_message(channel_id, "Sorry, there was an error processing your query. Please try again later.")
         finally:
-            # Ensure typing indicator is stopped
+            # Stop the typing indicator
             stop_typing.set()
-            if typing_thread.is_alive():
-                typing_thread.join(timeout=1)
+            typing_thread.join()
                 
     except Exception as e:
-        logger.error(f"Unexpected error in process_query: {str(e)}")
-        error_message = "I apologize, but an unexpected error occurred. Please try again later."
-        send_message(channel_id, error_message, root_id=root_id)
+        logger.error(f"Error processing query: {e}")
+        if channel_id:
+            send_message(channel_id, "Sorry, there was an error processing your query.")
         return jsonify({'response_type': 'in_channel'})
 
 @app.route('/test', methods=['GET'])
