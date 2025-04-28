@@ -37,3 +37,6 @@ pypdf==3.17.1
 # Web framework
 flask==2.0.1
 werkzeug==2.0.1
+
+# Additional dependencies
+youtube-transcript-api>=0.6.1
