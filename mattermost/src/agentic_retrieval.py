@@ -642,52 +642,42 @@ class AgenticRetrieval(RAG_Pipeline):
 	
 	def build_vectorstore(self, documents: List[Document]) -> None:
 		logger.info("Building vector store")
-   	 
+		
 		if not documents:
 			logger.warning("No documents to build vector store")
 			return
-   	 
+		
 		os.makedirs(os.path.dirname(self.persist_directory), exist_ok=True)
-   	 
-		vector_store = FAISS.from_documents(documents, self.embeddings)
-   	 
-		vector_store.save_local(self.persist_directory)
-   	 
-		self.retriever = vector_store.as_retriever(search_kwargs={"k": self.k})
-   	 
+		
+		self.vectorstore = Chroma.from_documents(
+			documents=documents,
+			embedding=self.embeddings,
+			persist_directory=self.persist_directory
+		)
+		self.vectorstore.persist()
+		self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.k})
+		
 		self.document_count = len(documents)
-   	 
+		
 		logger.info(f"Built vector store with {self.document_count} documents")
 	
 	def load_existing_vectorstore(self) -> bool:
 		logger.info(f"Loading existing vector store from {self.persist_directory}")
-   	 
+		
 		try:
 			if os.path.exists(self.persist_directory):
-				vector_store = FAISS.load_local(self.persist_directory, self.embeddings, allow_dangerous_deserialization=True)
-				self.retriever = vector_store.as_retriever(search_kwargs={"k": self.k})
-				self.document_count = len(vector_store.docstore._dict)
+				self.vectorstore = Chroma(
+					embedding_function=self.embeddings,
+					persist_directory=self.persist_directory
+				)
+				self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.k})
+				self.document_count = len(self.vectorstore.get()['ids'])
 				logger.info(f"Loaded vector store with {self.document_count} documents")
-				doc_keys = list(vector_store.docstore._dict.keys())
-				logger.info(f"First 5 document keys: {doc_keys[:5]}")
-				doc_sources = [vector_store.docstore._dict[key].metadata.get('source', 'unknown')
-						  	for key in list(vector_store.docstore._dict.keys())[:10]]
-				logger.info(f"Sample document sources: {doc_sources}")
-				# Count documents by source
-				source_counts = {}
-				for key in vector_store.docstore._dict.keys():
-					source = str(vector_store.docstore._dict[key].metadata.get('source', 'unknown'))
-					source_name = source.split('/')[-1] if '/' in source else source
-					if source_name in source_counts:
-						source_counts[source_name] += 1
-					else:
-						source_counts[source_name] = 1
-				logger.info(f"Document counts by source: {source_counts}")
-		   	 
+				
 				# Re-initialize corrective_rag_handler with the now available retriever
 				if self.retriever is not None:
 					self.corrective_rag_handler = CorrectiveRAG(self.llm, self.retriever)
-		   	 
+				
 				return True
 			else:
 				logger.warning(f"Vector store directory {self.persist_directory} does not exist")
@@ -705,14 +695,17 @@ class AgenticRetrieval(RAG_Pipeline):
 			return
 		
 		try:
-			vector_store = FAISS.load_local(self.persist_directory, self.embeddings, allow_dangerous_deserialization=True)
-			
 			# Create a set of existing fingerprints
 			existing_fingerprints = set()
-			for key, doc in vector_store.docstore._dict.items():
-				f = doc.metadata.get("fingerprint")
-				if f:
-					existing_fingerprints.add(f)
+			if self.vectorstore:
+				existing_docs = self.vectorstore.get()
+				for doc in existing_docs['documents']:
+					try:
+						import hashlib
+						fp = hashlib.sha256(doc.encode('utf-8')).hexdigest()
+						existing_fingerprints.add(fp)
+					except Exception:
+						pass
 			
 			# Filter incoming documents for new ones
 			new_documents = []
@@ -730,39 +723,16 @@ class AgenticRetrieval(RAG_Pipeline):
 			if not new_documents:
 				logger.info("No modifications detected in documents. Skipping vector store update.")
 				return
-	   	 
-			pre_update_sources = set()
-			for key in list(vector_store.docstore._dict.keys())[:20]:
-				source = vector_store.docstore._dict[key].metadata.get('source', 'unknown')
-				pre_update_sources.add(str(source))
-			logger.info(f"Pre-update document sources sample: {pre_update_sources}")
-	   	 
-			vector_store.add_documents(new_documents)
-	   	 
-			vector_store.save_local(self.persist_directory)
-	   	 
-			self.retriever = vector_store.as_retriever(search_kwargs={"k": self.k})
-	   	 
-			self.document_count = len(vector_store.docstore._dict)
-	   	 
-			post_update_sources = set()
-			for key in list(vector_store.docstore._dict.keys())[:20]:
-				source = vector_store.docstore._dict[key].metadata.get('source', 'unknown')
-				post_update_sources.add(str(source))
-	   	 
-			# Count documents by source after update
-			source_counts = {}
-			for key in vector_store.docstore._dict.keys():
-				source = str(vector_store.docstore._dict[key].metadata.get('source', 'unknown'))
-				source_name = source.split('/')[-1] if '/' in source else source
-				if source_name in source_counts:
-					source_counts[source_name] += 1
-				else:
-					source_counts[source_name] = 1
-	   	 
+			
+			if self.vectorstore:
+				self.vectorstore.add_documents(new_documents)
+				self.vectorstore.persist()
+			else:
+				self.build_vectorstore(new_documents)
+			
+			self.document_count = len(self.vectorstore.get()['ids'])
 			logger.info(f"Updated vector store with {len(new_documents)} new documents, total: {self.document_count}")
-			logger.info(f"Post-update document counts by source: {source_counts}")
-	   	 
+			
 			# Clear the semantic cache when vectorstore is updated
 			if self.cache_enabled and self.semantic_cache:
 				logger.info("Clearing semantic cache due to vectorstore update")
@@ -828,6 +798,14 @@ class AgenticRetrieval(RAG_Pipeline):
 				if self.retriever is not None:
 					self.corrective_rag_handler = CorrectiveRAG(self.llm, self.retriever)
 		   	 
+		# Create the RAG pipeline if we have a retriever
+		if self.retriever is not None:
+			self.create_rag_pipeline()
+			logger.info("RAG pipeline created successfully")
+		else:
+			logger.warning("No retriever available. RAG pipeline not created.")
+			return False
+   	 
 		return True
    	 
 		return vector_store_exists
@@ -1381,27 +1359,181 @@ class AgenticRetrieval(RAG_Pipeline):
 			# If video URL is provided, process as a YouTube query
 			if video_url:
 				result = self.process_youtube_query(query, video_url)
-						return {
+				return {
 					'answer': result['answer'],
 					'sources': [result['video_url']],
-							'web_search_used': False,
+					'web_search_used': False,
 					'web_search_triggered': False,
 					'evaluation': None,
 					'needs_professor_assistance': False
+				}
+			
+			# First, check if query is out of domain
+			classification = self.adaptive_rag_handler.classify_query(query)
+			query_type = classification.get('query_type', 'factual')
+			is_out_of_domain = classification.get('is_out_of_domain', False)
+			
+			logger.info(f"Query classification: {query_type}, Out of domain: {is_out_of_domain}")
+			
+			# If query is out of domain and web search is enabled, use web search directly
+			if is_out_of_domain and self.web_search_enabled:
+				logger.info("Query is out of domain, using web search directly")
+				if hasattr(self, 'web_search_agent') and self.web_search_agent and (not self.test_mode or self.enable_web_search_in_test_mode):
+					web_results = await self.web_search_agent.search(query)
+					if isinstance(web_results, dict):  # Check if web_results is a dictionary
+						return {
+							'answer': web_results.get('answer', 'No answer found'),
+							'sources': web_results.get('sources', []),
+							'web_search_used': True,
+							'web_search_triggered': True,
+							'web_search_info': {
+								'routing_reason': 'Query is out of domain',
+								'web_sources': web_results.get('sources', []),
+								'local_sources': []
+							},
+							'evaluation': {
+								'context_sufficiency': 1.0,
+								'faithfulness': 1.0,
+								'completeness': 1.0,
+								'hallucination': 0.15,  # Base hallucination score for web results
+								'confidence': 0.85
+							}
+						}
+					else:
+						logger.error(f"Unexpected web search results format: {type(web_results)}")
+						return {
+							'answer': "Sorry, I encountered an error processing web search results.",
+							'sources': [],
+							'web_search_used': False,
+							'web_search_triggered': True,
+							'evaluation': None
+						}
+				else:
+					return {
+						'answer': "I apologize, but this query appears to be outside my domain of expertise (numerical analysis and related topics). I can only provide accurate information about topics covered in the lecture notes and related mathematical concepts.",
+						'sources': [],
+						'web_search_used': False,
+						'web_search_triggered': False,
+						'evaluation': {
+							'context_sufficiency': 0.0,
+							'faithfulness': 1.0,
+							'completeness': 0.0,
+							'hallucination': 0.0,
+							'confidence': 1.0
+						}
 					}
+
+			# For in-domain queries or when web search is disabled, proceed with normal RAG pipeline
+			if self.rewrite_query:
+				rewritten_query = self.rewrite_user_query(query)
+				logger.info(f"Rewritten query: {rewritten_query}")
+			else:
+				rewritten_query = query
+
+			# Retrieve relevant documents
+			docs = self.retrieve_documents(rewritten_query)
 			
-			# Otherwise, process normally
-			return await super().invoke(query)
+			if not docs:
+				logger.warning("No relevant documents found")
+				if self.web_search_enabled and hasattr(self, 'web_search_agent') and self.web_search_agent and (not self.test_mode or self.enable_web_search_in_test_mode):
+					logger.info("Falling back to web search due to no relevant documents")
+					web_results = await self.web_search_agent.search(query)
+					if isinstance(web_results, dict):
+						return {
+							'answer': web_results.get('answer', 'No answer found'),
+							'sources': web_results.get('sources', []),
+							'web_search_used': True,
+							'web_search_triggered': True,
+							'web_search_info': {
+								'routing_reason': 'No relevant local documents found',
+								'web_sources': web_results.get('sources', []),
+								'local_sources': []
+							}
+						}
+					else:
+						return {
+							'answer': "Sorry, I encountered an error processing web search results.",
+							'sources': [],
+							'web_search_used': False,
+							'web_search_triggered': True
+						}
+				else:
+					return {
+						'answer': "I couldn't find any relevant information to answer your question.",
+						'sources': [],
+						'web_search_used': False,
+						'web_search_triggered': False
+					}
+
+			# Format context from retrieved documents
+			context = "\n\n".join([doc.page_content for doc in docs])
 			
-		except Exception as e:
-			logger.error(f"Error in invoke: {e}")
-			return {
-				'answer': f"Error processing query: {str(e)}",
-					'sources': [],
+			# Route the query to determine if web search is needed
+			routing_decision = self.route_query(query, context)
+			
+			# If web search is needed and enabled
+			if (routing_decision['datasource'] == 'web_search' and 
+				self.web_search_enabled and 
+				hasattr(self, 'web_search_agent') and 
+				self.web_search_agent and 
+				(not self.test_mode or self.enable_web_search_in_test_mode)):
+				
+				web_results = await self.web_search_agent.search(query)
+				if not isinstance(web_results, dict):
+					logger.error(f"Unexpected web search results format: {type(web_results)}")
+					web_results = {'answer': 'No answer found', 'context': '', 'sources': []}
+				
+				# Combine web results with local context
+				combined_context = f"{context}\n\n=== WEB SEARCH RESULTS ===\n\n{web_results.get('context', '')}"
+				
+				# Generate answer using combined context
+				answer = self.generate_answer(
+					query, 
+					combined_context,
+					web_search_info={
+						'web_search_used': True,
+						'web_sources': web_results.get('sources', []),
+						'local_sources': [doc.metadata.get('source', 'unknown') for doc in docs]
+					}
+				)
+				
+				return {
+					'answer': answer,
+					'sources': web_results.get('sources', []) + [doc.metadata.get('source', 'unknown') for doc in docs],
+					'web_search_used': True,
+					'web_search_triggered': True,
+					'web_search_info': {
+						'routing_reason': routing_decision['reason'],
+						'web_sources': web_results.get('sources', []),
+						'local_sources': [doc.metadata.get('source', 'unknown') for doc in docs]
+					}
+				}
+			else:
+				# Generate answer using only local context
+				answer = self.generate_answer(query, context)
+				
+				# Evaluate the answer if enabled
+				if self.evaluate and not self.test_mode:
+					evaluation = self.evaluate_answer(query, context, answer)
+				else:
+					evaluation = None
+				
+				return {
+					'answer': answer,
+					'sources': [doc.metadata.get('source', 'unknown') for doc in docs],
 					'web_search_used': False,
 					'web_search_triggered': False,
-				'evaluation': None,
-				'needs_professor_assistance': False
+					'evaluation': evaluation
+				}
+				
+		except Exception as e:
+			logger.error(f"Error processing query: {str(e)}", exc_info=True)
+			return {
+				'answer': f"Error processing query: {str(e)}",
+				'sources': [],
+				'web_search_used': False,
+				'web_search_triggered': False,
+				'evaluation': None
 			}
 
 	def process_youtube_query(self, query: str, video_url: str) -> Dict[str, Any]:

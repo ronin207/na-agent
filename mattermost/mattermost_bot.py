@@ -9,6 +9,11 @@ import websocket
 import time
 import re
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load environment variables
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(env_path)
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +30,12 @@ logger = logging.getLogger(__name__)
 MATTERMOST_URL = os.getenv('MATTERMOST_URL')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'knowledge-agent')
+
+# Debug logging
+logger.info(f"Environment variables loaded:")
+logger.info(f"MATTERMOST_URL: {MATTERMOST_URL}")
+logger.info(f"BOT_TOKEN: {'set' if BOT_TOKEN else 'not set'}")
+logger.info(f"BOT_USERNAME: {BOT_USERNAME}")
 
 # Initialize Flask app
 app = Flask(__name__)
