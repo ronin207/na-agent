@@ -26,7 +26,7 @@ class QueryRequest(BaseModel):
     text: str
 
 # Load environment variables
-env_path = os.path.join(os.path.dirname(__file__), '.env')
+env_path = os.path.join(project_root, '.env')
 logger.debug(f"Loading .env file from: {env_path}")
 load_dotenv(env_path)
 
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
     try:
         # Initialize RAG pipeline with your configuration
         rag_pipeline = AgenticRetrieval(
-            pdf_folder=os.path.join(os.path.dirname(__file__), "data"),
+            pdf_folder=os.path.join(project_root, "data"),
             persist_directory=os.path.join(project_root, "chroma_db"),
             force_rebuild=False,
             verbose=True
