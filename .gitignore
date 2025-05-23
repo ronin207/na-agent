@@ -4,15 +4,12 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -25,6 +22,11 @@ wheels/
 venv/
 ENV/
 .env
+lib/
+lib64/
+bin/
+include/
+pyvenv.cfg
 
 # IDE
 .idea/
@@ -32,28 +34,35 @@ ENV/
 *.swp
 *.swo
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
 # Logs
 *.log
-mattermost/*.log
-mattermost/logs/
+logs/
+*.log.*
 
 # Process IDs
-mattermost/pids/
 *.pid
+pids/
 
 # ngrok
 .ngrok/
 ngrok.yml
 
 # Mattermost configuration
-mattermost/.env
+.env
 
 # Data files
 data/
 *.db
 *.sqlite
 *.sqlite3
+chroma_db/
 
 # Cache files
 *.json
@@ -84,14 +93,6 @@ coverage.xml
 *.cover
 .hypothesis/
 
-# Operating System Files
-Thumbs.db
-
-# Ignore the data folder(s) to prevent accidental commits
-/data/
-# If your application uses another data folder (e.g. for PDFs or other assets), add it below
-/mattermost/data/
-
 # Node / JavaScript build artifacts and dependencies
 node_modules/
 
@@ -109,16 +110,12 @@ yarn-debug.log*
 yarn-error.log*
 *~
 
-# Database files for the mattermost project (Chroma vector DB) - these are generated files
-mattermost/chroma_db/chroma.sqlite3
-mattermost/chroma_db/index.pkl
-mattermost/chroma_db/index.faiss
-
 # IDE and editor directories/files
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
+.ropeproject/
 
 # Environment variable files
 *.yml

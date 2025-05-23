@@ -1,4 +1,4 @@
-from .final_decorator import finalclass
+from final_decorator import finalclass
 import logging
 import os
 import json
@@ -7,13 +7,13 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 from dotenv import load_dotenv
 
-from .agents.conversational import ConversationalAgent
-from .agents.websearch import WebSearchAgent
+from agents.conversational import ConversationalAgent
+from agents.websearch import WebSearchAgent
 
-from .rag.retrieval import RAG_Pipeline
-from .rag.self_retrieval import SelfRAG
-from .rag.corrective_retrieval import CorrectiveRAG
-from .rag.adaptive_retrieval import AdaptiveRAG
+from rag.retrieval import RAG_Pipeline
+from rag.self_retrieval import SelfRAG
+from rag.corrective_retrieval import CorrectiveRAG
+from rag.adaptive_retrieval import AdaptiveRAG
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
@@ -32,11 +32,11 @@ from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
 from pypdf import PdfReader
 import re
 
-from .semantic_cache import SemanticCache
+from semantic_cache import SemanticCache
 from llama_cloud_services import LlamaParse
 from llama_index.core import SimpleDirectoryReader
-from .jupyter_parser import JupyterParser
-from .youtube_processor import YouTubeProcessor
+from jupyter_parser import JupyterParser
+from youtube_processor import YouTubeProcessor
 
 # Define prompts directly in this file to avoid external dependencies
 QUERY_REWRITING_PROMPT = """
@@ -112,11 +112,11 @@ logger = logging.getLogger(__name__)
 def evaluate_context_sufficiency(llm: BaseLanguageModel, query: str, context: str) -> Dict[str, Any]:
 	prompt = """
 	Evaluate if the following context is sufficient to answer the query.
-	
+
 	Query: {query}
-	
+
 	Context: {context}
-	
+
 	Analyze the context and provide a JSON output with the following structure:
 	{{
 		"sufficiency_score": <float between 0.0 and 1.0>,
@@ -125,31 +125,31 @@ def evaluate_context_sufficiency(llm: BaseLanguageModel, query: str, context: st
 		"insufficient": <boolean - true if the context is not adequate to fully answer the query>,
 		"explanation": <string explaining your evaluation>
 	}}
-	
+
 	Consider:
 	- Does the context contain the necessary information?
 	- Is the information complete enough to form a comprehensive answer?
 	- Are there any obvious gaps in the information provided?
-	
+
 	Output only the JSON object.
 	"""
-	
+
 	messages = [
 		{"role": "system", "content": "You are an expert evaluator of context sufficiency."},
 		{"role": "user", "content": prompt.format(query=query, context=context)},
 	]
-	
+
 	result = llm.invoke(messages).content.strip()
-	
+
 	try:
 		# Extract JSON if it's embedded in other text
 		import re
 		json_match = re.search(r'({.*})', result, re.DOTALL)
 		if json_match:
 			result = json_match.group(1)
-	   	 
+
 		evaluation = json.loads(result)
-   	 
+
 		# Ensure all required fields are present
 		if "sufficiency_score" not in evaluation:
 			evaluation["sufficiency_score"] = 0.5
@@ -164,10 +164,10 @@ def evaluate_context_sufficiency(llm: BaseLanguageModel, query: str, context: st
 									 	evaluation["missing_details"])
 		if "explanation" not in evaluation:
 			evaluation["explanation"] = "Failed to extract explanation from evaluation."
-	   	 
+
 		# Ensure score is within bounds
 		evaluation["sufficiency_score"] = min(max(float(evaluation["sufficiency_score"]), 0.0), 1.0)
-   	 
+
 		return evaluation
 	except Exception as e:
 		logger.warning(f"Could not parse context sufficiency evaluation: {e}. Raw result: {result}")
@@ -182,27 +182,27 @@ def evaluate_context_sufficiency(llm: BaseLanguageModel, query: str, context: st
 def evaluate_faithfulness(llm: BaseLanguageModel, context: str, answer: str) -> float:
 	prompt = """
 	Evaluate if the following answer is faithful to the provided context.
-	
+
 	Context: {context}
-	
+
 	Answer: {answer}
-	
+
 	On a scale from 0.0 to 1.0, how faithful is this answer to the context?
 	Consider:
 	- Does the answer contain information not present in the context?
 	- Does the answer contradict any information in the context?
 	- Does the answer accurately represent the information in the context?
-	
+
 	Output only a number between 0.0 and 1.0 representing your evaluation.
 	"""
-	
+
 	messages = [
 		{"role": "system", "content": "You are an expert evaluator of answer faithfulness."},
 		{"role": "user", "content": prompt.format(context=context, answer=answer)},
 	]
-	
+
 	result = llm.invoke(messages).content.strip()
-	
+
 	try:
 		score = float(result)
 		return min(max(score, 0.0), 1.0)
@@ -214,27 +214,27 @@ def evaluate_faithfulness(llm: BaseLanguageModel, context: str, answer: str) -> 
 def evaluate_completeness(llm: BaseLanguageModel, query: str, answer: str) -> float:
 	prompt = """
 	Evaluate if the following answer completely addresses the query.
-	
+
 	Query: {query}
-	
+
 	Answer: {answer}
-	
+
 	On a scale from 0.0 to 1.0, how completely does this answer address the query?
 	Consider:
 	- Does the answer address all aspects of the query?
 	- Is the answer thorough and comprehensive?
 	- Are there any parts of the query left unanswered?
-	
+
 	Output only a number between 0.0 and 1.0 representing your evaluation.
 	"""
-	
+
 	messages = [
 		{"role": "system", "content": "You are an expert evaluator of answer completeness."},
 		{"role": "user", "content": prompt.format(query=query, answer=answer)},
 	]
-	
+
 	result = llm.invoke(messages).content.strip()
-	
+
 	try:
 		score = float(result)
 		return min(max(score, 0.0), 1.0)
@@ -246,39 +246,39 @@ def evaluate_completeness(llm: BaseLanguageModel, query: str, answer: str) -> fl
 def evaluate_hallucination(llm: BaseLanguageModel, context: str, answer: str) -> float:
 	prompt = """
 	Evaluate if the following answer contains hallucinations not supported by the context.
-	
+
 	Context: {context}
-	
+
 	Answer: {answer}
-	
+
 	On a scale from 0.0 to 1.0, how much hallucination does this answer contain?
 	Consider:
 	- Does the answer include specific facts not present in the context?
 	- Does the answer make claims that cannot be verified from the context?
 	- Does the answer extrapolate beyond what can be reasonably inferred from the context?
-	
-	IMPORTANT: If the answer includes content from web search results (marked with '=== WEB SEARCH RESULTS ===' or [WEB] tags), 
-	consider that such information is derived from less curated sources and may be inherently less reliable. 
-	In your evaluation, assign a non-zero hallucination score (at least 0.15) if web-derived information is present, 
+
+	IMPORTANT: If the answer includes content from web search results (marked with '=== WEB SEARCH RESULTS ===' or [WEB] tags),
+	consider that such information is derived from less curated sources and may be inherently less reliable.
+	In your evaluation, assign a non-zero hallucination score (at least 0.15) if web-derived information is present,
 	even if the rest of the answer appears supported by local documents.
-	
+
 	Output only a number between 0.0 and 1.0 representing your evaluation.
 	A higher score means MORE hallucination.
 	"""
-	
+
 	messages = [
 		{"role": "system", "content": "You are an expert evaluator of answer hallucination."},
 		{"role": "user", "content": prompt.format(context=context, answer=answer)},
 	]
-	
+
 	result = llm.invoke(messages).content.strip()
-	
+
 	try:
 		score = float(result)
 		# Apply minimum hallucination score if web search markers are present in the answer
 		if score < 0.15 and (
-			"=== WEB SEARCH RESULTS ===" in answer or 
-			"[WEB]" in answer or 
+			"=== WEB SEARCH RESULTS ===" in answer or
+			"[WEB]" in answer or
 			"Web Sources:" in answer
 		):
 			# Enforce a minimum hallucination score for web search content
@@ -296,7 +296,7 @@ class AgenticRetrieval(RAG_Pipeline):
 	Enhanced RAG pipeline with advanced agentic techniques.
 	This class extends the RAG_Pipeline with Self-RAG, Adaptive RAG, and Corrective RAG
 	techniques to improve the quality and relevance of generated responses.
-	
+
 	Provides concise output that is dynamic to the query, similar to the style in retrieval.py.
 	"""
 	def __init__(
@@ -304,12 +304,12 @@ class AgenticRetrieval(RAG_Pipeline):
 		pdf_folder: str = "./data/",
 		chunk_size: int = 500,
 		chunk_overlap: int = 300,
-		embedding_model: str = "text-embedding-3-small",  
-		llm_model: str = "gpt-3.5-turbo",  
+		embedding_model: str = "text-embedding-3-small",
+		llm_model: str = "gpt-3.5-turbo",
 		persist_directory: str = "./chroma_db",
 		temperature: float = 0.0,
 		user_agent: str = "USER_AGENT",
-		
+
 		math_parsing_instruction: str = None,
 		k: int = 15,
 		rewrite_query: bool = True,
@@ -330,19 +330,19 @@ class AgenticRetrieval(RAG_Pipeline):
 		max_cache_size: int = 1000,
 	):
 		os.environ['USER_AGENT'] = user_agent
-		
+
 		# Set default math parsing instruction if not provided
 		if math_parsing_instruction is None:
 			math_parsing_instruction = "Format all mathematical expressions using LaTeX notation. Enclose display equations in double dollar signs ($$...$$) and inline equations in single dollar signs ($...$)."
-   	 
+
 		# Load environment variables from the parent directory
 		env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
 		load_dotenv(env_path)
-   	 
+
 		openai_api_key = os.getenv("OPENAI_API_KEY")
 		if not openai_api_key:
 			raise ValueError("OPENAI_API_KEY environment variable is not set. Please check your .env file.")
-   	 
+
 		self.pdf_folder = pdf_folder
 		self.chunk_size = chunk_size
 		self.chunk_overlap = chunk_overlap
@@ -377,7 +377,7 @@ class AgenticRetrieval(RAG_Pipeline):
 			)
 		else:
 			self.semantic_cache = None
-   	 
+
 		# Initialize OpenAI models
 		self.llm = ChatOpenAI(
 			model_name=self.llm_model,
@@ -406,10 +406,10 @@ class AgenticRetrieval(RAG_Pipeline):
 			input_variables=["query", "context"],
 		)
 		self.answer_generation_system_prompt = ANSWER_GENERATION_SYSTEM_PROMPT
-   	 
+
 		# Store the math parsing instruction
 		self.math_parsing_instruction = math_parsing_instruction
-   	 
+
 		self.query_classification_prompt = PromptTemplate(
 			template="""
 			Classify the following query into one of these categories:
@@ -418,44 +418,44 @@ class AgenticRetrieval(RAG_Pipeline):
 			- Procedural: Asking how to do something
 			- Ambiguous: Unclear or could have multiple interpretations
 			- Complex: Requiring deep analysis or multiple information sources
-	   	 
+
 			Query: {query}
-	   	 
+
 			Output only the category name.
 			""",
 			input_variables=["query"],
 		)
-   	 
+
 		self.query_rewriting_chat_prompt = ChatPromptTemplate.from_messages([
 			SystemMessagePromptTemplate.from_template(self.query_rewriting_system_prompt),
 			HumanMessagePromptTemplate.from_template(QUERY_REWRITING_PROMPT)
 		])
-   	 
+
 		self.answer_generation_chat_prompt = ChatPromptTemplate.from_messages([
 			SystemMessagePromptTemplate.from_template(self.answer_generation_system_prompt),
 			HumanMessagePromptTemplate.from_template(self.answer_generation_prompt.template)
 		])
-   	 
+
 		self.self_rag_prompt = PromptTemplate(
 			template="""
 			You are an expert evaluator. Assess the quality of the following answer based on the provided context.
-	   	 
+
 			Query: {query}
-	   	 
+
 			Context: {context}
-	   	 
+
 			Generated Answer: {answer}
-	   	 
+
 			Evaluate the answer on the following criteria:
 			1. Relevance to the query
 			2. Factual accuracy based on the context
 			3. Completeness of information
 			4. Presence of any hallucinations or information not in the context
-	   	 
+
 			First, provide a detailed critique of the answer.
 			Then, rate the overall quality on a scale of 0.0 to 1.0.
 			Finally, suggest specific improvements if needed.
-	   	 
+
 			Output your response in the following format:
 			Critique: <your detailed critique>
 			Confidence Score: <score between 0.0 and 1.0>
@@ -468,26 +468,26 @@ class AgenticRetrieval(RAG_Pipeline):
 		# Note: self.retriever is None at this point and will be set during setup
 		self.corrective_rag_handler = CorrectiveRAG(self.llm, self.retriever)
 		self.adaptive_rag_handler = AdaptiveRAG(self.llm, self.verbose)
-   	 
+
 		# Initialize web search agent if enabled
 		self.web_search_enabled = web_search_enabled
 		self.web_search_threshold = web_search_threshold
 		self.web_search_agent = None
-   	 
+
 		if self.web_search_enabled:
 			# Only use OpenAI API key for web search
-			openai_api_key = { 
+			openai_api_key = {
 				'openai': os.environ.get("OPENAI_API_KEY"),
 			}
 
 			self.web_search_agent = WebSearchAgent(
 				api_keys=openai_api_key,
-				search_engine='openai',  
+				search_engine='openai',
 				max_results=5,
 				verbose=self.verbose
 			)
 			logger.info(f"Web search fallback enabled with OpenAI search and threshold {self.web_search_threshold}")
-   	 
+
 		# Initialize conversational agent
 		self.max_history_length = max_history_length
 		self.conversational_agent = ConversationalAgent(
@@ -499,19 +499,19 @@ class AgenticRetrieval(RAG_Pipeline):
 		# Initialize components
 		self.parser = LlamaParse(result_type="text", system_prompt_append=self.math_parsing_instruction)
 		self.jupyter_parser = JupyterParser(include_outputs=True, include_raw_code=True)
-		
+
 		# Update file extractor configuration
 		self.file_extractor = {
 			".pdf": self.parser,
 			".ipynb": lambda x: self.jupyter_parser.parse(x)  # Wrap in lambda to ensure proper method binding
 		}
-		
+
 		# Initialize SimpleDirectoryReader with the file extractor
 		self.reader = SimpleDirectoryReader(
 			input_dir=self.pdf_folder,
 			file_extractor=self.file_extractor
 		)
-		
+
 		self.text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
 			chunk_size=self.chunk_size,
 				chunk_overlap=self.chunk_overlap,
@@ -521,16 +521,16 @@ class AgenticRetrieval(RAG_Pipeline):
 
 	async def load_documents(self) -> List[Document]:
 		logger.info(f"Loading documents from {self.pdf_folder}")
-		
+
 		if not self.pdf_folder or not os.path.exists(self.pdf_folder):
 			logger.warning(f"PDF folder {self.pdf_folder} does not exist")
 			return []
-		
+
 		try:
 			# First, try to identify PowerPoint-converted PDFs
 			ppt_pdfs = []
 			regular_pdfs = []
-			
+
 			for file in os.listdir(self.pdf_folder):
 				if file.endswith('.pdf'):
 					file_path = os.path.join(self.pdf_folder, file)
@@ -546,9 +546,9 @@ class AgenticRetrieval(RAG_Pipeline):
 					except Exception as e:
 						logger.warning(f"Error checking PDF type for {file}: {e}")
 						regular_pdfs.append(file_path)
-			
+
 			documents = []
-			
+
 			# Load PowerPoint-converted PDFs with our custom loader
 			for ppt_pdf in ppt_pdfs:
 				try:
@@ -558,7 +558,7 @@ class AgenticRetrieval(RAG_Pipeline):
 					logger.info(f"Loaded {len(docs)} pages from PowerPoint-converted PDF: {ppt_pdf}")
 				except Exception as e:
 					logger.error(f"Error loading PowerPoint-converted PDF {ppt_pdf}: {e}")
-			
+
 			# Load regular PDFs with PyPDFLoader
 			if regular_pdfs:
 				loader = DirectoryLoader(
@@ -570,18 +570,18 @@ class AgenticRetrieval(RAG_Pipeline):
 				docs = loader.load()
 				documents.extend(docs)
 				logger.info(f"Loaded {len(docs)} pages from regular PDFs")
-			
+
 			logger.info(f"Total documents loaded: {len(documents)}")
 			return documents
-			
+
 		except Exception as e:
 			logger.error(f"Error loading documents: {e}")
 			return []
-	
+
 	def format_documents(self, documents: List[Any]) -> List[Document]:
 		formatted_docs = []
 		seen_ids = set()
-   	 
+
 		for doc in documents:
 			# Deduplicate using a fingerprint of the page_content
 			fingerprint = None
@@ -607,23 +607,23 @@ class AgenticRetrieval(RAG_Pipeline):
 				if fingerprint:
 					new_doc.metadata["fingerprint"] = fingerprint
 				formatted_docs.append(new_doc)
-   	 
+
 		return formatted_docs
-	
+
 	def prepare_documents(self, documents: List[Document]) -> List[Document]:
 		logger.info("Preparing documents")
-   	 
+
 		if not documents:
 			return []
-   	 
+
 		text_splitter = RecursiveCharacterTextSplitter(
 			chunk_size=self.chunk_size,
 			chunk_overlap=self.chunk_overlap,
 			length_function=len
 		)
-   	 
+
 		document_chunks = text_splitter.split_documents(documents)
-   	 
+
 		# Deduplicate document chunks based on content fingerprint
 		unique_chunks = []
 		seen = set()
@@ -637,33 +637,36 @@ class AgenticRetrieval(RAG_Pipeline):
 				seen.add(fp)
 				unique_chunks.append(doc)
 		logger.info(f"Created {len(unique_chunks)} unique document chunks from {len(document_chunks)} chunks")
-   	 
+
 		return unique_chunks
-	
+
 	def build_vectorstore(self, documents: List[Document]) -> None:
 		logger.info("Building vector store")
-		
+
 		if not documents:
 			logger.warning("No documents to build vector store")
 			return
-		
+
 		os.makedirs(os.path.dirname(self.persist_directory), exist_ok=True)
-		
+
+		# Filter complex metadata types first
+		filtered_documents = self.filter_complex_metadata(documents)
+
 		self.vectorstore = Chroma.from_documents(
-			documents=documents,
+			documents=filtered_documents,
 			embedding=self.embeddings,
 			persist_directory=self.persist_directory
 		)
 		self.vectorstore.persist()
 		self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.k})
-		
+
 		self.document_count = len(documents)
-		
+
 		logger.info(f"Built vector store with {self.document_count} documents")
-	
+
 	def load_existing_vectorstore(self) -> bool:
 		logger.info(f"Loading existing vector store from {self.persist_directory}")
-		
+
 		try:
 			if os.path.exists(self.persist_directory):
 				self.vectorstore = Chroma(
@@ -673,11 +676,11 @@ class AgenticRetrieval(RAG_Pipeline):
 				self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.k})
 				self.document_count = len(self.vectorstore.get()['ids'])
 				logger.info(f"Loaded vector store with {self.document_count} documents")
-				
+
 				# Re-initialize corrective_rag_handler with the now available retriever
 				if self.retriever is not None:
 					self.corrective_rag_handler = CorrectiveRAG(self.llm, self.retriever)
-				
+
 				return True
 			else:
 				logger.warning(f"Vector store directory {self.persist_directory} does not exist")
@@ -685,16 +688,19 @@ class AgenticRetrieval(RAG_Pipeline):
 		except Exception as e:
 			logger.error(f"Error loading vector store: {e}")
 			return False
-	
+
 	def update_vectorstore(self, documents: List[Document]) -> None:
 		"""Update the vectorstore with new documents"""
 		logger.info("Updating vector store")
-		
+
 		if not documents:
 			logger.warning("No documents to update vector store")
 			return
-		
+
 		try:
+			# Filter complex metadata types first
+			filtered_documents = self.filter_complex_metadata(documents)
+			
 			# Create a set of existing fingerprints
 			existing_fingerprints = set()
 			if self.vectorstore:
@@ -706,10 +712,10 @@ class AgenticRetrieval(RAG_Pipeline):
 						existing_fingerprints.add(fp)
 					except Exception:
 						pass
-			
+
 			# Filter incoming documents for new ones
 			new_documents = []
-			for doc in documents:
+			for doc in filtered_documents:
 				try:
 					import hashlib
 					fp = hashlib.sha256(doc.page_content.encode('utf-8')).hexdigest()
@@ -719,42 +725,411 @@ class AgenticRetrieval(RAG_Pipeline):
 					# Add fingerprint to metadata if not present
 					doc.metadata["fingerprint"] = fp
 					new_documents.append(doc)
-			
+
 			if not new_documents:
 				logger.info("No modifications detected in documents. Skipping vector store update.")
 				return
-			
+
 			if self.vectorstore:
 				self.vectorstore.add_documents(new_documents)
 				self.vectorstore.persist()
 			else:
 				self.build_vectorstore(new_documents)
-			
+
 			self.document_count = len(self.vectorstore.get()['ids'])
 			logger.info(f"Updated vector store with {len(new_documents)} new documents, total: {self.document_count}")
-			
+
 			# Clear the semantic cache when vectorstore is updated
 			if self.cache_enabled and self.semantic_cache:
 				logger.info("Clearing semantic cache due to vectorstore update")
 				self.semantic_cache.clear()
-			
+
 			# Re-initialize corrective_rag_handler with the updated retriever
 			if self.retriever is not None:
 				self.corrective_rag_handler = CorrectiveRAG(self.llm, self.retriever)
 		except Exception as e:
 			logger.error(f"Error updating vector store: {e}")
-			self.build_vectorstore(documents)
+			self.build_vectorstore(filtered_documents)
+
+	def create_multi_representation_index(self, documents: List[Document]) -> None:
+		"""
+		Create a multi-representation index from documents, with different levels of abstraction.
+		This includes:
+		1. Document-level summaries
+		2. Section-level chunks
+		3. Fine-grained chunks
+		4. Entity and concept extractions
+		
+		This enhances retrieval by allowing for different granularities of matching.
+		"""
+		logger.info("Creating multi-representation index")
+		
+		if not documents:
+			logger.warning("No documents to index")
+			return
+		
+		try:
+			all_representations = []
+			
+			# Create parent summaries first
+			parent_summaries = self._create_parent_summaries(documents)
+			all_representations.extend(parent_summaries)
+			
+			# Create section chunks
+			section_chunks = self._create_section_chunks(documents)
+			all_representations.extend(section_chunks)
+			
+			# Create fine-grained chunks (smaller chunks for detailed matching)
+			fine_chunks = self._create_fine_chunks(documents)
+			all_representations.extend(fine_chunks)
+			
+			# Create entity-linked representations
+			entity_docs = self._extract_entities_and_concepts(documents)
+			all_representations.extend(entity_docs)
+			
+			# Update the vectorstore with all representations
+			logger.info(f"Adding {len(all_representations)} multi-representation documents to vector store")
+			self.update_vectorstore(all_representations)
+			
+		except Exception as e:
+			logger.error(f"Error creating multi-representation index: {e}")
+		
+	def _create_parent_summaries(self, documents: List[Document]) -> List[Document]:
+		"""Create document-level summaries."""
+		logger.info("Creating document-level summaries")
+		summaries = []
+		
+		# Group documents by source
+		docs_by_source = {}
+		for doc in documents:
+			source = doc.metadata.get('source', 'unknown')
+			if source not in docs_by_source:
+				docs_by_source[source] = []
+			docs_by_source[source].append(doc)
+		
+		# Create a summary for each source
+		for source, docs in docs_by_source.items():
+			if len(docs) == 0:
+				continue
+				
+			# Combine content from all docs with this source
+			combined_content = "\n\n".join([d.page_content for d in docs])
+			
+			# Generate summary using LLM
+			prompt = f"""
+			Create a comprehensive summary of the following document.
+			Include key concepts, definitions, and main points.
+			
+			Document: {combined_content[:10000]}  # Truncate to avoid token limits
+			
+			Summary:
+			"""
+			
+			try:
+				messages = [
+					{"role": "system", "content": "You are an expert at creating concise, information-dense summaries of technical documents."},
+					{"role": "user", "content": prompt}
+				]
+				
+				summary = self.llm.invoke(messages).content
+				
+				# Create a new document with the summary
+				summary_doc = Document(
+					page_content=summary,
+					metadata={
+						"source": source,
+						"representation_type": "document_summary",
+						"doc_type": "summary",
+						"parent_doc": source
+					}
+				)
+				summaries.append(summary_doc)
+				logger.info(f"Created summary for source: {source}")
+				
+			except Exception as e:
+				logger.warning(f"Error creating summary for {source}: {e}")
+		
+		return summaries
 	
+	def _create_section_chunks(self, documents: List[Document]) -> List[Document]:
+		"""Create section-level chunks based on headings and structure."""
+		logger.info("Creating section-level chunks")
+		
+		# List to store all section chunks
+		section_chunks = []
+		
+		# Define section delimiter patterns
+		section_patterns = [
+			r'#+\s+.+',  # Markdown headings
+			r'Section \d+',  # Section with number
+			r'Chapter \d+',  # Chapter 
+			r'\d+\.\d+\s+.+',  # Numbered sections like 1.1, 1.2, etc.
+			r'\n\n[A-Z][A-Za-z\s]+\n'  # Capitalized lines that might be headings
+		]
+		
+		# Compile the patterns
+		import re
+		compiled_patterns = [re.compile(pattern) for pattern in section_patterns]
+		
+		# Helper function to find section boundaries
+		def find_sections(text):
+			# Start with the entire document as one section
+			sections = [(0, len(text), text)]
+			
+			# Find potential section boundaries
+			boundaries = []
+			for pattern in compiled_patterns:
+				for match in pattern.finditer(text):
+					boundaries.append(match.start())
+			
+			# Sort boundaries
+			boundaries.sort()
+			
+			# If we found boundaries, split the text
+			if boundaries:
+				new_sections = []
+				start = 0
+				for boundary in boundaries:
+					# Only consider it a boundary if it's not too close to the beginning
+					if boundary > start + 100:  # Minimum section size
+						new_sections.append((start, boundary, text[start:boundary]))
+						start = boundary
+				
+				# Add the last section
+				if start < len(text):
+					new_sections.append((start, len(text), text[start:]))
+				
+				if new_sections:
+					return new_sections
+			
+			# Return the original if no good boundaries found
+			return sections
+		
+		# Process each document
+		for doc in documents:
+			source = doc.metadata.get('source', 'unknown')
+			page = doc.metadata.get('page', None)
+			
+			# Find sections in this document
+			sections = find_sections(doc.page_content)
+			
+			# Create a document for each section
+			for i, (start, end, section_text) in enumerate(sections):
+				# Skip very small sections
+				if len(section_text.strip()) < 100:
+					continue
+				
+				# Extract a potential title from the section
+				lines = section_text.strip().split('\n')
+				title = lines[0] if lines else "Unnamed Section"
+				
+				# Truncate long titles
+				if len(title) > 100:
+					title = title[:100] + "..."
+				
+				# Create metadata for the section
+				section_metadata = {
+					"source": source,
+					"representation_type": "section_chunk",
+					"doc_type": "section",
+					"parent_doc": source,
+					"section_index": i,
+					"section_title": title
+				}
+				
+				# Add page number if available
+				if page is not None:
+					section_metadata["page"] = page
+				
+				# Create the section document
+				section_doc = Document(
+					page_content=section_text,
+					metadata=section_metadata
+				)
+				
+				section_chunks.append(section_doc)
+			
+			logger.info(f"Created {len(sections)} section chunks for document from {source}")
+		
+		return section_chunks
+	
+	def _create_fine_chunks(self, documents: List[Document]) -> List[Document]:
+		"""Create fine-grained chunks for detailed matching."""
+		logger.info("Creating fine-grained chunks")
+		
+		# Create a text splitter with smaller chunk size
+		fine_splitter = RecursiveCharacterTextSplitter(
+			chunk_size=200,  # Much smaller chunks
+			chunk_overlap=50,
+			length_function=len
+		)
+		
+		fine_chunks = []
+		
+		for doc in documents:
+			source = doc.metadata.get('source', 'unknown')
+			
+			# Split into small chunks
+			small_chunks = fine_splitter.split_text(doc.page_content)
+			
+			# Create documents from small chunks
+			for i, chunk in enumerate(small_chunks):
+				if len(chunk.strip()) < 50:  # Skip very small chunks
+					continue
+					
+				# Create the fine chunk document
+				fine_doc = Document(
+					page_content=chunk,
+					metadata={
+						"source": source,
+						"representation_type": "fine_chunk",
+						"doc_type": "detail",
+						"parent_doc": source,
+						"chunk_index": i
+					}
+				)
+				
+				fine_chunks.append(fine_doc)
+			
+			logger.info(f"Created {len(small_chunks)} fine chunks for document from {source}")
+		
+		return fine_chunks
+	
+	def _extract_entities_and_concepts(self, documents: List[Document]) -> List[Document]:
+		"""Extract entities and key concepts from documents."""
+		logger.info("Extracting entities and concepts")
+		
+		entity_docs = []
+		
+		# Process in batches to avoid too many API calls
+		batch_size = min(5, len(documents))
+		for i in range(0, len(documents), batch_size):
+			batch = documents[i:i+batch_size]
+			batch_content = "\n\n".join([doc.page_content[:5000] for doc in batch])  # Limit size
+			
+			prompt = f"""
+			Extract key mathematical concepts, theorems, definitions, and entities from the text below.
+			For each extracted element, provide:
+			1. The name or identifier
+			2. A concise definition or explanation
+			3. Related concepts or properties
+			
+			TEXT:
+			{batch_content}
+			
+			Format as a JSON list:
+			[
+				{{
+					"name": "concept_name",
+					"type": "concept|theorem|definition|entity", 
+					"definition": "concise definition",
+					"related": ["related concept 1", "related concept 2"]
+				}},
+				...
+			]
+			"""
+			
+			try:
+				messages = [
+					{"role": "system", "content": "You are an expert at identifying and extracting key mathematical concepts and entities from text."},
+					{"role": "user", "content": prompt}
+				]
+				
+				result = self.llm.invoke(messages).content
+				
+				# Parse the JSON response
+				import json
+				import re
+				
+				# Try to extract JSON if not cleanly formatted
+				json_match = re.search(r'\[.*\]', result, re.DOTALL)
+				if json_match:
+					result = json_match.group(0)
+				
+				entities = json.loads(result)
+				
+				# Create a document for each entity/concept
+				for entity in entities:
+					name = entity.get("name", "Unnamed Concept")
+					entity_type = entity.get("type", "concept")
+					definition = entity.get("definition", "")
+					related = entity.get("related", [])
+					
+					# Convert related concepts to string to avoid list metadata issues
+					related_str = ", ".join(related) if isinstance(related, list) else str(related)
+					
+					# Create content for the entity document
+					content = f"Name: {name}\nType: {entity_type}\nDefinition: {definition}\nRelated concepts: {related_str}"
+					
+					# Create metadata - ensure all values are primitives
+					metadata = {
+						"source": batch[0].metadata.get('source', 'unknown'),
+						"representation_type": "entity",
+						"doc_type": entity_type,
+						"entity_name": name,
+						"related_concepts_str": related_str  # Store as string not list
+					}
+					
+					# Create entity document
+					entity_doc = Document(
+						page_content=content,
+						metadata=metadata
+					)
+					
+					entity_docs.append(entity_doc)
+				
+				logger.info(f"Extracted {len(entities)} entities/concepts from batch")
+				
+			except Exception as e:
+				logger.warning(f"Error extracting entities: {e}")
+		
+		return entity_docs
+	
+	def filter_complex_metadata(self, documents: List[Document]) -> List[Document]:
+		"""
+		Filter complex metadata types (like lists and dicts) from document metadata.
+		Converts them to string representations to ensure Chroma compatibility.
+		"""
+		logger.info("Filtering complex metadata types")
+		filtered_docs = []
+		
+		for doc in documents:
+			# Create a new metadata dict with only primitive types
+			new_metadata = {}
+			
+			for key, value in doc.metadata.items():
+				# Handle different non-primitive types
+				if isinstance(value, (list, tuple)):
+					new_metadata[key + "_str"] = ", ".join(str(item) for item in value)
+				elif isinstance(value, dict):
+					new_metadata[key + "_str"] = json.dumps(value)
+				elif value is None:
+					new_metadata[key] = ""
+				elif isinstance(value, (str, int, float, bool)):
+					new_metadata[key] = value
+				else:
+					# Convert any other type to string
+					new_metadata[key + "_str"] = str(value)
+			
+			# Create a new document with the filtered metadata
+			filtered_doc = Document(
+				page_content=doc.page_content,
+				metadata=new_metadata
+			)
+			filtered_docs.append(filtered_doc)
+		
+		return filtered_docs
+
 	def get_document_count(self) -> int:
 		return self.document_count
-	
+
 	async def setup(self) -> bool:
 		logger.info("Setting up RAG pipeline")
-   	 
+
 		if self.pdf_folder and not os.path.exists(self.pdf_folder):
 			logger.warning(f"PDF folder {self.pdf_folder} does not exist")
 			return False
-   	 
+
 		if self.force_rebuild and os.path.exists(self.persist_directory):
 			logger.info(f"Force rebuilding vector store. Deleting {self.persist_directory}")
 			import shutil
@@ -767,37 +1142,47 @@ class AgenticRetrieval(RAG_Pipeline):
 				return False
 		else:
 			vector_store_exists = self.load_existing_vectorstore()
-   	 
+
 		# Check for cached chunks to avoid duplicate processing
 		if vector_store_exists and self.chunks_cached:
 			logger.info("Document chunks already cached. Skipping document reprocessing.")
 		else:
 			if self.pdf_folder:
 				documents = await self.load_documents()
-		   	 
+
 				if not documents:
 					logger.warning("No documents loaded")
 					return vector_store_exists
-		   	 
+
 				formatted_docs = self.format_documents(documents)
 				document_chunks = self.prepare_documents(formatted_docs)
-		   	 
+
 				if not document_chunks:
 					logger.warning("No document chunks created")
 					return vector_store_exists
-		   	 
+
 				if vector_store_exists and not self.force_rebuild:
+					# Update using standard chunking
 					self.update_vectorstore(document_chunks)
+					
+					# Create advanced multi-representation index
+					logger.info("Creating multi-representation index for enhanced retrieval")
+					self.create_multi_representation_index(formatted_docs)
 				else:
+					# Build vectorstore with standard chunks first
 					self.build_vectorstore(document_chunks)
-				
+					
+					# Then create advanced representations
+					logger.info("Creating multi-representation index for enhanced retrieval")
+					self.create_multi_representation_index(formatted_docs)
+
 				# Mark chunks as cached after processing
 				self.chunks_cached = True
-		   	 
+
 				# Re-initialize corrective_rag_handler with the now available retriever
 				if self.retriever is not None:
 					self.corrective_rag_handler = CorrectiveRAG(self.llm, self.retriever)
-		   	 
+
 		# Create the RAG pipeline if we have a retriever
 		if self.retriever is not None:
 			self.create_rag_pipeline()
@@ -805,48 +1190,48 @@ class AgenticRetrieval(RAG_Pipeline):
 		else:
 			logger.warning("No retriever available. RAG pipeline not created.")
 			return False
-   	 
+
 		return True
-   	 
+
 		return vector_store_exists
 
 
 	def rewrite_user_query(self, query: str) -> str:
 		logger.info(f"Rewriting query: {query}")
-   	 
+
 		messages = [
 			{"role": "system", "content": self.query_rewriting_system_prompt},
 			{"role": "user", "content": self.query_rewriting_prompt.format(query=query)},
 		]
-   	 
+
 		rewritten_query = self.llm.invoke(messages).content
-   	 
+
 		logger.info(f"Rewritten query: {rewritten_query}")
-   	 
+
 		return rewritten_query
 
 
 	def reciprocal_rank_fusion(self, results: List[List[Document]], k: int = 60) -> List[Document]:
 		logger.info(f"Performing reciprocal rank fusion on {len(results)} result sets")
 		from langchain.load import dumps, loads
-   	 
+
 		fused_scores = {}
-   	 
+
 		for docs in results:
 			for rank, doc in enumerate(docs):
 				doc_str = dumps(doc)
 				if doc_str not in fused_scores:
 					fused_scores[doc_str] = 0
 				fused_scores[doc_str] += 1 / (rank + k)
-   	 
+
 		reranked_results = [
 			loads(doc)
 			for doc, score in sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
 		]
-   	 
+
 		logger.info(f"Reciprocal rank fusion produced {len(reranked_results)} unique documents")
 		return reranked_results
-	
+
 	def generate_hypothetical_document(self, query: str) -> Document:
 		logger.info(f"Generating hypothetical document for query: {query}")
 		template = """You are an expert at creating hypothetical documents that would perfectly answer a user's query.
@@ -860,37 +1245,50 @@ class AgenticRetrieval(RAG_Pipeline):
 
 		Hypothetical document:
 		"""
-   	 
+
 		prompt = PromptTemplate(template=template, input_variables=["query"])
-   	 
+
 		messages = [
 			{"role": "user", "content": prompt.format(query=query)},
 		]
-   	 
+
 		hypothetical_content = self.llm.invoke(messages).content
-   	 
+
 		return Document(
 			page_content=hypothetical_content,
 			metadata={"source": "hypothetical_document", "query": query}
 		)
-   	 
+
 	def retrieve_documents(self, query: str) -> List[Document]:
 		logger.info(f"Retrieving documents for query: {query}")
+
+		# Check if this is an academic/lecture-related query 
+		import re
+		is_academic_query = re.search(r'lecture|assignment|exercise|course|notes|class|professor|student', query.lower()) is not None
 		
+		# For academic queries, use specialized retrieval
+		if is_academic_query:
+			logger.info("Detected academic query, using specialized academic content retrieval")
+			academic_docs = self.retrieve_academic_content(query)
+			if academic_docs:
+				return academic_docs
+			# If no academic docs found, continue with regular retrieval
+			logger.info("No specialized academic content found, falling back to regular retrieval")
+
 		alternative_queries = [query]
-		
+
 		for i in range(2):
 			alt_query = self.rewrite_user_query(f"Alternative version {i+1} of: {query}")
 			if alt_query and alt_query != query:
 				alternative_queries.append(alt_query)
-		
+
 		if self.verbose:
 			logger.info(f"Generated {len(alternative_queries)} alternative queries: {alternative_queries}")
-		
+
 		# Store unique documents using their content hash
 		seen_docs = {}
 		retrieval_results = []
-		
+
 		for alt_query in alternative_queries:
 			docs = self.retriever.get_relevant_documents(alt_query)
 			# Deduplicate documents based on content
@@ -905,22 +1303,22 @@ class AgenticRetrieval(RAG_Pipeline):
 				except Exception as e:
 					logger.warning(f"Error hashing document content: {e}")
 					unique_docs.append(doc)
-			
+
 			if unique_docs:  # Only add if we found unique documents
 				retrieval_results.append(unique_docs)
 				logger.info(f"Retrieved {len(unique_docs)} unique documents for query: {alt_query}")
-		
+
 		logger.info("Generating hypothetical document based on the original query")
 		hypothetical_doc = self.generate_hypothetical_document(query)
-		
+
 		logger.info("Retrieving documents similar to the hypothetical document")
 		hypothetical_embedding = self.embeddings.embed_documents([hypothetical_doc.page_content])[0]
-		
+
 		vector_store = Chroma(
 			embedding_function=self.embeddings,
 			persist_directory=self.persist_directory
 		)
-		
+
 		hyde_results = vector_store.similarity_search_by_vector(hypothetical_embedding)
 		# Deduplicate HYDE results
 		unique_hyde_results = []
@@ -933,26 +1331,26 @@ class AgenticRetrieval(RAG_Pipeline):
 			except Exception as e:
 				logger.warning(f"Error hashing HYDE document content: {e}")
 				unique_hyde_results.append(doc)
-		
+
 		if unique_hyde_results:  # Only add if we found unique documents
 			retrieval_results.append(unique_hyde_results)
-		
+
 		logger.info("Merging retrieval results using reciprocal rank fusion")
 		fused_results = self.reciprocal_rank_fusion(retrieval_results)
-		
+
 		# Filter for relevant sources and deduplicate one final time
 		docs = fused_results[:self.k]
 		logger.info(f"Filtering {len(docs)} fused results for relevance")
-		
+
 		# Final deduplication of sources
 		unique_sources = {}
 		for doc in docs:
 			source = doc.metadata.get('source', 'unknown')
 			if source not in unique_sources:
 				unique_sources[source] = doc
-		
+
 		final_docs = list(unique_sources.values())
-		
+
 		# Only log detailed document info in verbose mode
 		if self.verbose:
 			for i, doc in enumerate(final_docs[:3]):
@@ -960,7 +1358,7 @@ class AgenticRetrieval(RAG_Pipeline):
 				page = doc.metadata.get('page', 'unknown page')
 				logger.info(f"Document {i+1}: {source} (Page: {page})")
 				logger.info(f"Preview of document {i+1}:\n{doc.page_content[:200]}...\n")
-			
+
 			# Count unique sources
 			source_counts = {}
 			for doc in final_docs:
@@ -971,35 +1369,42 @@ class AgenticRetrieval(RAG_Pipeline):
 				else:
 					source_counts[source_name] = 1
 			logger.info(f"Retrieved document counts by unique source: {source_counts}")
-		
+
 		logger.info(f"Retrieved {len(final_docs)} unique documents")
-		
+
+		# For academic queries where we fell back to regular retrieval,
+		# apply the academic content scoring as a final step
+		if is_academic_query:
+			academic_metadata = self._extract_academic_metadata(query)
+			final_docs = self._score_academic_relevance(query, final_docs, academic_metadata)
+			logger.info(f"Re-ranked documents based on academic relevance, final count: {len(final_docs)}")
+
 		return final_docs
 
 
 	def generate_answer(self, query: str, context: str, web_search_info: Dict[str, Any] = None) -> str:
 		logger.info("Generating answer")
-		
+
 		# Add style guidance to system prompt
 		system_prompt = self.answer_generation_system_prompt
-		
+
 		# Add math parsing instruction to system prompt if available
 		if self.math_parsing_instruction:
 			system_prompt = f"{system_prompt}\n\n{self.math_parsing_instruction}"
-		
+
 		# Add web search instruction to system prompt if web search was used
 		if web_search_info and web_search_info.get("web_search_used", False):
 			system_prompt += "\n\nParts of the context are from web search results (marked with === WEB SEARCH RESULTS === tags). Clearly indicate when you're using information from web sources versus local documents. When citing information, specify whether it comes from [LOCAL] or [WEB] sources and include the source reference when possible."
-		
+
 		# Prepare user prompt with context
 		user_prompt = f"""
 		Based on the following context, provide a clear and concise answer that matches the style of lecture notes.
 		Focus on fundamental understanding and avoid unnecessary complexity.
-		
+
 		Query: {query}
-		
+
 		Context: {context}
-		
+
 		Remember to:
 		1. Use clear, simple language
 		2. Break down complex concepts
@@ -1011,59 +1416,59 @@ class AgenticRetrieval(RAG_Pipeline):
 		8. When using information from web search results, clearly indicate this in the response
 		9. Do not include local document sources if the information comes from web search results
 		"""
-		
+
 		messages = [
 			{"role": "system", "content": system_prompt},
 			{"role": "user", "content": user_prompt},
 			]
-		
+
 		answer = self.llm.invoke(messages).content
-		
+
 		# Process the answer to preserve LaTeX expressions
 		answer = self._preserve_latex_expressions(answer)
-		
+
 		# Add web search notification if applicable
 		if web_search_info and web_search_info.get("web_search_used", False):
 			# Only include web sources, not local sources
 			web_sources = web_search_info.get("web_sources", [])
-			
+
 			# Create source section
 			source_section = "\n\n---\n**Sources Used:**\n"
-			
+
 			# Add web sources
 			if web_sources:
 				source_section += "\n".join([f"- {source}" for source in web_sources])
-			
+
 			answer += source_section
-			
+
 			# Add web search notification
 			answer += "\n\n*Note: This answer includes information from web search results.*"
-		
+
 		logger.info("Answer generated")
-		
+
 		return answer
-	
+
 	def _preserve_latex_expressions(self, text: str) -> str:
 		"""
 		Preserve LaTeX expressions in the text to ensure they are properly displayed.
 		This handles both inline and display LaTeX expressions using $$...$$ format.
 		"""
 		import re
-		
+
 		# Function to replace LaTeX expressions with a placeholder
 		def replace_latex(match):
 			return match.group(0)
-		
+
 		# Handle display LaTeX expressions ($$...$$)
 		display_latex_pattern = r'\$\$(.*?)\$\$'
 		text = re.sub(display_latex_pattern, replace_latex, text, flags=re.DOTALL)
-		
+
 		# Handle inline LaTeX expressions ($$...$$)
 		inline_latex_pattern = r'\$\$(.*?)\$\$'
 		text = re.sub(inline_latex_pattern, replace_latex, text, flags=re.DOTALL)
-		
+
 		return text
-   	 
+
 	def determine_web_search_threshold(self, query: str) -> float:
 		"""
 		Determine an appropriate web search threshold based on query complexity.
@@ -1071,22 +1476,22 @@ class AgenticRetrieval(RAG_Pipeline):
 		Then scales the output to a threshold between 0.4 and 0.8.
 		"""
 		logger.info(f"Determining web search threshold for query: {query}")
-   	 
+
 		complexity_prompt = f"""
 		Analyze this query and rate its complexity on a scale of 1 to 10:
-   	 
+
 		Query: {query}
-   	 
+
 		Output only a number from 1-10.
 		"""
-   	 
+
 		messages = [
 			{"role": "system", "content": "You are an expert at analyzing query complexity."},
 			{"role": "user", "content": complexity_prompt}
 		]
-   	 
+
 		result = self.llm.invoke(messages).content.strip()
-   	 
+
 		try:
 			complexity = float(result)
 			threshold = 0.4 + (complexity / 10) * 0.4
@@ -1097,7 +1502,7 @@ class AgenticRetrieval(RAG_Pipeline):
 		except Exception as e:
 			logger.warning(f"Could not determine dynamic threshold: {e}. Using default: {self.web_search_threshold}")
 			return self.web_search_threshold  # fallback
-	   	 
+
 	def filter_relevant_sources(self, query: str, docs: List[Document]) -> List[Document]:
 		"""
 		Filter the provided documents using an LLM prompt to check if each document
@@ -1105,59 +1510,232 @@ class AgenticRetrieval(RAG_Pipeline):
 		Only returns documents that are confirmed as relevant by the LLM.
 		"""
 		logger.info(f"Filtering relevant sources for query: {query}")
-   	 
+
 		if not docs:
 			return []
-	   	 
+
 		prompt = f"""
 		For the query: "{query}", list the document numbers (1-indexed) that contain information
 		directly relevant to answering this query. Only output the numbers separated by commas.
-   	 
+
 		Consider that a document is relevant only if it includes key concepts, steps, or detailed
 		explanations required for a complete answer.
 		Also, favor using local context when sufficient details are present.
 		"""
-   	 
+
 		formatted_docs = ""
 		for i, doc in enumerate(docs):
 			source = doc.metadata.get('source', 'unknown')
 			formatted_docs += f"Document {i+1} [Source: {source}]:\n{doc.page_content[:300]}...\n\n"
-	   	 
+
 		messages = [
 			{"role": "system", "content": "You are an expert at evaluating document relevance."},
 			{"role": "user", "content": prompt + "\n" + formatted_docs}
 		]
-   	 
+
 		result = self.llm.invoke(messages).content.strip()
-   	 
+
 		import re
 		indices = [int(x) - 1 for x in re.findall(r'\d+', result) if int(x) <= len(docs)]
-   	 
+
 		if not indices:
 			logger.warning("No relevant documents identified. Returning all documents.")
 			return docs
-	   	 
+
 		relevant_docs = [docs[i] for i in indices]
 		logger.info(f"Filtered {len(docs)} documents down to {len(relevant_docs)} relevant ones")
-   	 
+
 		return relevant_docs
 
+	def retrieve_academic_content(self, query: str, filters: Dict[str, Any] = None) -> List[Document]:
+		"""
+		Specialized retrieval for academic content like lectures, considering lecture numbers, topics, and document types.
+		This method enhances retrieval for academic queries by more specifically targeting the right sources.
+		
+		Args:
+			query: The user query
+			filters: Optional metadata filters
+			
+		Returns:
+			List of relevant documents
+		"""
+		logger.info(f"Using specialized academic content retrieval for: {query}")
+		
+		# Extract academic metadata from query
+		academic_metadata = self._extract_academic_metadata(query)
+		
+		# If filters were also provided, merge them
+		if filters:
+			# Merge filters, prioritizing extracted academic metadata
+			for key, value in academic_metadata.items():
+				if value:
+					filters[key] = value
+			metadata = filters
+		else:
+			metadata = academic_metadata
+		
+		# If source identification is present (lecture number, etc.), prioritize that
+		if academic_metadata.get("lecture_num") or academic_metadata.get("specific_source"):
+			logger.info(f"Identified specific source: Lecture {academic_metadata.get('lecture_num')} or {academic_metadata.get('specific_source')}")
+			
+			# Create source-specific retrieval
+			docs = self._retrieve_by_source(query, academic_metadata)
+			
+			# If we found documents, use them
+			if docs:
+				logger.info(f"Found {len(docs)} documents from specified source")
+				return docs
+		
+		# Fallback to standard retrieval with enhanced metadata
+		docs = self.retrieve_with_metadata_filters(query, metadata)
+		
+		# Apply stricter relevance scoring for academic content
+		scored_docs = self._score_academic_relevance(query, docs, academic_metadata)
+		
+		return scored_docs
+	
+	def _extract_academic_metadata(self, query: str) -> Dict[str, Any]:
+		"""
+		Extract academic-specific metadata from the query, such as lecture numbers,
+		assignments, specific topics, and document types.
+		"""
+		# Extract lecture numbers using regex
+		import re
+		lecture_matches = re.search(r'lecture\s*(\d+)', query.lower())
+		assignment_matches = re.search(r'assignment\s*(\d+\.\d+|\d+)', query.lower())
+		exercise_matches = re.search(r'exercise\s*(\d+\.\d+|\d+)', query.lower())
+		
+		# Extract course materials metadata
+		metadata = {
+			"lecture_num": lecture_matches.group(1) if lecture_matches else None,
+			"assignment_num": assignment_matches.group(1) if assignment_matches else None,
+			"exercise_num": exercise_matches.group(1) if exercise_matches else None,
+			"specific_source": None,
+			"doc_type": None,
+			"topic": None
+		}
+		
+		# Determine document type
+		if "lecture" in query.lower():
+			metadata["doc_type"] = "lecture"
+		elif "assignment" in query.lower() or "exercise" in query.lower():
+			metadata["doc_type"] = "assignment"
+		elif "note" in query.lower():
+			metadata["doc_type"] = "notes"
+			
+		# Determine specific source from lecture/assignment number
+		if metadata["lecture_num"]:
+			# Convert pattern like "lecture 03" to file pattern "3rd.pdf" or similar
+			lecture_num = int(metadata["lecture_num"])
+			if lecture_num == 1:
+				metadata["specific_source"] = "1st.pdf"
+			elif lecture_num == 2:
+				metadata["specific_source"] = "2nd.pdf"
+			elif lecture_num == 3:
+				metadata["specific_source"] = "3rd.pdf"
+			else:
+				metadata["specific_source"] = f"{lecture_num}th.pdf"
+		
+		return metadata
+	
+	def _retrieve_by_source(self, query: str, metadata: Dict[str, Any]) -> List[Document]:
+		"""
+		Retrieve documents from a specific source (like a specific lecture PDF).
+		This is particularly useful when the query explicitly mentions a source.
+		"""
+		specific_source = metadata.get("specific_source")
+		
+		if not specific_source or not self.retriever:
+			return []
+			
+		# Use metadata filtering with source prioritization
+		try:
+			# Get documents from retriever
+			base_docs = self.retriever.get_relevant_documents(query)
+			
+			# Filter for documents from the specified source
+			source_docs = []
+			for doc in base_docs:
+				doc_source = doc.metadata.get('source', '')
+				
+				# Look for the specific source filename in the document source path
+				if specific_source.lower() in str(doc_source).lower():
+					source_docs.append(doc)
+			
+			logger.info(f"Retrieved {len(source_docs)} documents from source {specific_source}")
+			return source_docs
+			
+		except Exception as e:
+			logger.warning(f"Error in source-specific retrieval: {e}")
+			return []
+	
+	def _score_academic_relevance(self, query: str, docs: List[Document], metadata: Dict[str, Any]) -> List[Document]:
+		"""
+		Apply academic-specific relevance scoring to documents.
+		
+		This improves accuracy for academic content by checking if documents actually
+		contain information about the specific lecture, topic, or assignment mentioned.
+		"""
+		if not docs:
+			return []
+			
+		# Prepare content-matching criteria
+		matching_criteria = []
+		
+		if metadata.get("lecture_num"):
+			lecture_num = metadata.get("lecture_num")
+			matching_criteria.append(f"lecture {lecture_num}")
+			matching_criteria.append(f"lecture{lecture_num}")
+			# Handle ordinal forms
+			if lecture_num == "1":
+				matching_criteria.append("first lecture")
+			elif lecture_num == "2":
+				matching_criteria.append("second lecture")
+			elif lecture_num == "3":
+				matching_criteria.append("third lecture")
+				
+		# Manually score each document
+		scored_docs = []
+		for doc in docs:
+			# Start with base score from filename match
+			base_score = 0
+			if metadata.get("specific_source") and metadata.get("specific_source").lower() in str(doc.metadata.get("source", "")).lower():
+				base_score += 5
+				
+			# Add score for content matches
+			content_score = 0
+			doc_content = doc.page_content.lower()
+			
+			for criterion in matching_criteria:
+				if criterion.lower() in doc_content:
+					content_score += 2
+					
+			# Total score
+			total_score = base_score + content_score
+			
+			# Only include if score is above threshold
+			if total_score > 0:
+				scored_docs.append((doc, total_score))
+				
+		# Sort by score and return documents
+		scored_docs.sort(key=lambda x: x[1], reverse=True)
+		return [doc for doc, _ in scored_docs]
 
 	def route_query(self, query: str, context: str) -> Dict[str, Any]:
 		"""
-		Your task is to decide how to best answer a user's question. The process begins by first considering the subject matter of the query. 
-		Specifically, you need to determine if the question falls within the domain of numerical analysis. If, upon examination, you find that 
-		the query is not related to numerical analysis, then the appropriate course of action is to perform a web search to find the answer. 
-		However, if you determine that the query does indeed pertain to the field of numerical analysis, the next step is to consult a local 
-		vector store containing relevant documents. Within this vector store, you must search for contextual information that can directly 
-		answer the user's question. If, after searching the vector store, no suitable context is found, you should return a message indicating 
-		that the query is out of scope for the local documents. Conversely, if relevant contextual information is successfully retrieved from 
+		Your task is to decide how to best answer a user's question. The process begins by first considering the subject matter of the query.
+		Specifically, you need to determine if the question falls within the domain of numerical analysis. If, upon examination, you find that
+		the query is not related to numerical analysis, then the appropriate course of action is to perform a web search to find the answer.
+		However, if you determine that the query does indeed pertain to the field of numerical analysis, the next step is to consult a local
+		vector store containing relevant documents. Within this vector store, you must search for contextual information that can directly
+		answer the user's question. If, after searching the vector store, no suitable context is found, you should return a message indicating
+		that the query is out of scope for the local documents. Conversely, if relevant contextual information is successfully retrieved from
 		the vector store, you should then use this local information to formulate your answer and return the local result to the user.
-		
+
 		Args:
 			query: The user's query (string)
 			context: The retrieved local context (string)
-		
+
 		Returns:
 			A dictionary containing the routing decision with the following keys:
 			- datasource: Either "web_search", "local", or "out_of_scope"
@@ -1195,10 +1773,10 @@ class AgenticRetrieval(RAG_Pipeline):
 			"finite difference", "finite element", "numerical stability", "rounding error",
 			"truncation error", "numerical accuracy", "numerical precision"
 		]
-		
+
 		query_lower = query.lower()
 		is_domain_related = any(keyword in query_lower for keyword in domain_keywords)
-		
+
 		if not is_domain_related:
 			logger.info("Query is not related to numerical analysis domain")
 			return {
@@ -1218,12 +1796,12 @@ class AgenticRetrieval(RAG_Pipeline):
 			r'algorithm', r'method', r'technique', r'procedure',
 			r'example', r'problem', r'solution', r'derivation'
 		]
-		
+
 		has_technical_content = any(
-			re.search(pattern, context, re.IGNORECASE) 
+			re.search(pattern, context, re.IGNORECASE)
 			for pattern in technical_indicators
 		)
-		
+
 		if not has_technical_content:
 			logger.info("No technical content found in local documents")
 			return {
@@ -1241,7 +1819,7 @@ class AgenticRetrieval(RAG_Pipeline):
 			context_embedding = self.embeddings.embed_query(context[:1000])  # First 1000 chars for efficiency
 			similarity = cosine_similarity([query_embedding], [context_embedding])[0][0]
 			logger.info(f"Semantic similarity between query and context: {similarity:.3f}")
-			
+
 			# Use a higher threshold for technical content
 			if similarity > 0.7:  # Increased threshold for technical content
 				logger.info(f"Strong semantic match found in technical documents (similarity: {similarity:.3f})")
@@ -1276,13 +1854,13 @@ class AgenticRetrieval(RAG_Pipeline):
 
 	def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
 		logger.info("Evaluating answer")
-   	 
+
 		context_evaluation = evaluate_context_sufficiency(self.llm, query, context)
 		context_sufficiency = context_evaluation.get("sufficiency_score", 0.0)
 		faithfulness = evaluate_faithfulness(self.llm, context, answer)
 		completeness = evaluate_completeness(self.llm, query, answer)
 		hallucination = evaluate_hallucination(self.llm, context, answer)
-   	 
+
 		evaluation_results = {
 			"context_sufficiency": context_sufficiency,
 			"faithfulness": faithfulness,
@@ -1292,10 +1870,10 @@ class AgenticRetrieval(RAG_Pipeline):
 			"missing_details": context_evaluation.get("missing_details", True),
 			"explanation": context_evaluation.get("explanation", "No explanation provided")
 		}
-   	 
+
 		if self.verbose:
 			logger.info(f"Evaluation results: {evaluation_results}")
-   	 
+
 		return evaluation_results
 
 
@@ -1346,16 +1924,28 @@ class AgenticRetrieval(RAG_Pipeline):
 
 	async def invoke(self, query: str, video_url: str = None) -> Dict[str, Any]:
 		"""
-		Process a query, now with optional YouTube video support.
+		Process a query using advanced retrieval techniques.
 		
+		This enhanced pipeline includes:
+		- Self-query retrieval with metadata filters
+		- Query decomposition for complex questions
+		- Document reranking
+		- Routing to appropriate database types
+		- Improved context aggregation
+		- Evaluation and regeneration
+
 		Args:
 			query: The user's query
 			video_url: Optional YouTube video URL
-			
+
 		Returns:
 			Dictionary containing the answer and other metadata
 		"""
 		try:
+			# Start timing
+			import time
+			start_time = time.time()
+			
 			# If video URL is provided, process as a YouTube query
 			if video_url:
 				result = self.process_youtube_query(query, video_url)
@@ -1367,77 +1957,198 @@ class AgenticRetrieval(RAG_Pipeline):
 					'evaluation': None,
 					'needs_professor_assistance': False
 				}
+
+			# Check semantic cache first
+			if self.cache_enabled and self.semantic_cache:
+				cache_result = self.semantic_cache.get(query)
+				if cache_result:
+					logger.info(f"Cache hit for query: {query}")
+					return {
+						'answer': cache_result.get('answer', ''),
+						'sources': cache_result.get('sources', []),
+						'web_search_used': cache_result.get('web_search_used', False),
+						'web_search_triggered': cache_result.get('web_search_triggered', False),
+						'evaluation': cache_result.get('evaluation', None),
+						'from_cache': True
+					}
 			
-			# First, check if query is out of domain
-			classification = self.adaptive_rag_handler.classify_query(query)
-			query_type = classification.get('query_type', 'factual')
-			is_out_of_domain = classification.get('is_out_of_domain', False)
+			# Determine query type and routing
+			try:
+				query_analysis = self.determine_query_type(query)
+				db_type = query_analysis.get("db_type", "vector_db")
+				is_multi_hop = query_analysis.get("multi_hop", False)
+				complexity = query_analysis.get("complexity", "simple")
+				needs_external = query_analysis.get("needs_external", False)
+				
+				logger.info(f"Query analysis: db={db_type}, multi_hop={is_multi_hop}, complexity={complexity}, external={needs_external}")
+			except Exception as e:
+				logger.warning(f"Error in query analysis: {e}. Using default settings.")
+				db_type = "vector_db"
+				is_multi_hop = False
+				complexity = "simple"
+				needs_external = False
 			
-			logger.info(f"Query classification: {query_type}, Out of domain: {is_out_of_domain}")
-			
-			# If query is out of domain and web search is enabled, use web search directly
-			if is_out_of_domain and self.web_search_enabled:
-				logger.info("Query is out of domain, using web search directly")
-				if hasattr(self, 'web_search_agent') and self.web_search_agent and (not self.test_mode or self.enable_web_search_in_test_mode):
+			# If needs external knowledge and web search is enabled
+			if needs_external and self.web_search_enabled and (not self.test_mode or self.enable_web_search_in_test_mode):
+				logger.info("Query needs external knowledge, using web search")
+				
+				if hasattr(self, 'web_search_agent') and self.web_search_agent:
 					web_results = await self.web_search_agent.search(query)
-					if isinstance(web_results, dict):  # Check if web_results is a dictionary
+					
+					if isinstance(web_results, dict):
 						return {
 							'answer': web_results.get('answer', 'No answer found'),
 							'sources': web_results.get('sources', []),
 							'web_search_used': True,
 							'web_search_triggered': True,
 							'web_search_info': {
-								'routing_reason': 'Query is out of domain',
+								'routing_reason': 'Query needs external knowledge',
 								'web_sources': web_results.get('sources', []),
-								'local_sources': []
-							},
-							'evaluation': {
-								'context_sufficiency': 1.0,
-								'faithfulness': 1.0,
-								'completeness': 1.0,
-								'hallucination': 0.15,  # Base hallucination score for web results
-								'confidence': 0.85
+								'complexity': complexity
 							}
 						}
-					else:
-						logger.error(f"Unexpected web search results format: {type(web_results)}")
-						return {
-							'answer': "Sorry, I encountered an error processing web search results.",
-							'sources': [],
-							'web_search_used': False,
-							'web_search_triggered': True,
-							'evaluation': None
-						}
+			
+			# Extract metadata filters for vector DB search
+			metadata_filters = {}
+			if db_type == "vector_db":
+				try:
+					metadata_filters = self.extract_metadata_filters(query)
+				except Exception as e:
+					logger.warning(f"Error extracting metadata filters: {e}. Proceeding without filters.")
+					metadata_filters = {}
+			
+			# If multi-hop is needed, decompose the query
+			if is_multi_hop and complexity != "simple":
+				logger.info("Using multi-hop approach for complex query")
+				
+				# Decompose the query into sub-questions
+				sub_questions = self.decompose_query(query)
+				
+				if not sub_questions or len(sub_questions) == 1:
+					# Fallback to standard approach if decomposition fails
+					logger.warning("Query decomposition returned only one sub-question, falling back to standard approach")
+					is_multi_hop = False
 				else:
+					# Process each sub-question
+					all_docs = []
+					sub_answers = []
+					
+					for sq in sub_questions:
+						sub_query = sq["sub_question"]
+						sq_type = sq["type"]
+						logger.info(f"Processing sub-question: {sub_query} (type: {sq_type})")
+						
+						# Retrieve documents for this sub-question
+						if db_type == "vector_db":
+							# Use metadata filters with the sub-query
+							sub_docs = self.retrieve_with_metadata_filters(sub_query, metadata_filters)
+						else:
+							# Use appropriate database for non-vector queries
+							sub_docs = self.execute_db_query(sub_query, db_type, query)
+						
+						# Rerank the documents for this sub-question
+						reranked_docs = self.rerank_documents(sub_query, sub_docs)
+						all_docs.extend(reranked_docs)
+						
+						# Generate answer for this sub-question
+						sub_context = "\n\n".join([doc.page_content for doc in reranked_docs])
+						sub_answer = self.generate_answer(sub_query, sub_context)
+						sub_answers.append(sub_answer)
+					
+					# Aggregate the sub-answers into a final answer
+					answer = self.aggregate_sub_answers(sub_questions, sub_answers, query)
+					
+					# For sources, deduplicate based on source path
+					seen_sources = set()
+					sources = []
+					for doc in all_docs:
+						source = doc.metadata.get('source', 'unknown')
+						if source not in seen_sources:
+							seen_sources.add(source)
+							sources.append(source)
+					
+					# Evaluate the answer
+					if self.evaluate and not self.test_mode:
+						# Use all documents for evaluation
+						all_context = "\n\n".join([doc.page_content for doc in all_docs])
+						evaluation = self.evaluate_answer(query, all_context, answer)
+					else:
+						evaluation = None
+					
+					# If evaluation shows poor quality and web search is enabled, try web search
+					if (evaluation and 
+						(evaluation.get('context_sufficiency', 0) < self.web_search_threshold or 
+						 evaluation.get('completeness', 0) < self.web_search_threshold) and
+						self.web_search_enabled and 
+						(not self.test_mode or self.enable_web_search_in_test_mode) and
+						hasattr(self, 'web_search_agent') and 
+						self.web_search_agent):
+						
+						logger.info("Initial answer quality insufficient, trying web search")
+						web_results = await self.web_search_agent.search(query)
+						
+						if isinstance(web_results, dict):
+							# Combine local and web results
+							combined_answer = self.generate_answer(
+								query,
+								all_context + "\n\n=== WEB SEARCH RESULTS ===\n\n" + web_results.get('context', ''),
+								web_search_info={
+									'web_search_used': True,
+									'web_sources': web_results.get('sources', [])
+								}
+							)
+							
+							return {
+								'answer': combined_answer,
+								'sources': sources + web_results.get('sources', []),
+								'web_search_used': True,
+								'web_search_triggered': True,
+								'multi_hop_used': True,
+								'sub_questions': [sq['sub_question'] for sq in sub_questions],
+								'evaluation': evaluation
+							}
+					
+					# Store in cache if enabled
+					if self.cache_enabled and self.semantic_cache:
+						self.semantic_cache.put(
+							query,
+							{
+								'answer': answer,
+								'sources': sources,
+								'web_search_used': False,
+								'web_search_triggered': False,
+								'multi_hop_used': True,
+								'evaluation': evaluation
+							}
+						)
+					
+					# Return the final multi-hop result
 					return {
-						'answer': "I apologize, but this query appears to be outside my domain of expertise (numerical analysis and related topics). I can only provide accurate information about topics covered in the lecture notes and related mathematical concepts.",
-						'sources': [],
+						'answer': answer,
+						'sources': sources,
 						'web_search_used': False,
 						'web_search_triggered': False,
-						'evaluation': {
-							'context_sufficiency': 0.0,
-							'faithfulness': 1.0,
-							'completeness': 0.0,
-							'hallucination': 0.0,
-							'confidence': 1.0
-						}
+						'multi_hop_used': True,
+						'sub_questions': [sq['sub_question'] for sq in sub_questions],
+						'evaluation': evaluation,
+						'processing_time': time.time() - start_time
 					}
-
-			# For in-domain queries or when web search is disabled, proceed with normal RAG pipeline
-			if self.rewrite_query:
-				rewritten_query = self.rewrite_user_query(query)
-				logger.info(f"Rewritten query: {rewritten_query}")
-			else:
-				rewritten_query = query
-
-			# Retrieve relevant documents
-			docs = self.retrieve_documents(rewritten_query)
 			
+			# Standard approach for single-hop or fallback
+			if db_type == "vector_db":
+				# Use self-query retrieval with metadata filters
+				docs = self.retrieve_with_metadata_filters(query, metadata_filters)
+			else:
+				# Use appropriate database for the query
+				docs = self.execute_db_query(query, db_type, query)
+
 			if not docs:
 				logger.warning("No relevant documents found")
+				
 				if self.web_search_enabled and hasattr(self, 'web_search_agent') and self.web_search_agent and (not self.test_mode or self.enable_web_search_in_test_mode):
 					logger.info("Falling back to web search due to no relevant documents")
 					web_results = await self.web_search_agent.search(query)
+					
 					if isinstance(web_results, dict):
 						return {
 							'answer': web_results.get('answer', 'No answer found'),
@@ -1448,84 +2159,114 @@ class AgenticRetrieval(RAG_Pipeline):
 								'routing_reason': 'No relevant local documents found',
 								'web_sources': web_results.get('sources', []),
 								'local_sources': []
-							}
+							},
+							'processing_time': time.time() - start_time
 						}
-					else:
-						return {
-							'answer': "Sorry, I encountered an error processing web search results.",
-							'sources': [],
-							'web_search_used': False,
-							'web_search_triggered': True
-						}
-				else:
+				
 					return {
 						'answer': "I couldn't find any relevant information to answer your question.",
 						'sources': [],
 						'web_search_used': False,
-						'web_search_triggered': False
-					}
+					'web_search_triggered': False,
+					'processing_time': time.time() - start_time
+				}
+			
+			# Rerank documents
+			reranked_docs = self.rerank_documents(query, docs)
+			
+			# Format context from reranked documents
+			context = "\n\n".join([doc.page_content for doc in reranked_docs])
+			
+			# Generate answer using context
+			answer = self.generate_answer(query, context)
+			
+			# Sources list
+			sources = [doc.metadata.get('source', 'unknown') for doc in reranked_docs]
+			
+			# Evaluate the answer
+			if self.evaluate and not self.test_mode:
+				evaluation = self.evaluate_answer(query, context, answer)
+				
+				# Self-RAG evaluation for improved answer quality
+				self_rag_results = self.self_rag_evaluation(query, context, answer)
+				
+				# If evaluation shows poor quality and web search is enabled, try web search
+				if ((evaluation.get('context_sufficiency', 0) < self.web_search_threshold or 
+					 evaluation.get('completeness', 0) < self.web_search_threshold or
+					 self_rag_results.get('confidence_score', 1.0) < self.self_rag_threshold) and
+				self.web_search_enabled and
+					(not self.test_mode or self.enable_web_search_in_test_mode) and
+				hasattr(self, 'web_search_agent') and
+					self.web_search_agent):
 
-			# Format context from retrieved documents
-			context = "\n\n".join([doc.page_content for doc in docs])
-			
-			# Route the query to determine if web search is needed
-			routing_decision = self.route_query(query, context)
-			
-			# If web search is needed and enabled
-			if (routing_decision['datasource'] == 'web_search' and 
-				self.web_search_enabled and 
-				hasattr(self, 'web_search_agent') and 
-				self.web_search_agent and 
-				(not self.test_mode or self.enable_web_search_in_test_mode)):
-				
-				web_results = await self.web_search_agent.search(query)
-				if not isinstance(web_results, dict):
-					logger.error(f"Unexpected web search results format: {type(web_results)}")
-					web_results = {'answer': 'No answer found', 'context': '', 'sources': []}
-				
-				# Combine web results with local context
-				combined_context = f"{context}\n\n=== WEB SEARCH RESULTS ===\n\n{web_results.get('context', '')}"
-				
-				# Generate answer using combined context
-				answer = self.generate_answer(
-					query, 
-					combined_context,
-					web_search_info={
-						'web_search_used': True,
-						'web_sources': web_results.get('sources', []),
-						'local_sources': [doc.metadata.get('source', 'unknown') for doc in docs]
-					}
-				)
-				
-				return {
-					'answer': answer,
-					'sources': web_results.get('sources', []) + [doc.metadata.get('source', 'unknown') for doc in docs],
+					logger.info("Answer quality insufficient, augmenting with web search")
+					web_results = await self.web_search_agent.search(query)
+					
+					if isinstance(web_results, dict):
+						# Combine local and web results
+						combined_answer = self.generate_answer(
+							query,
+							context + "\n\n=== WEB SEARCH RESULTS ===\n\n" + web_results.get('context', ''),
+							web_search_info={
+								'web_search_used': True,
+								'web_sources': web_results.get('sources', [])
+							}
+						)
+						
+						# Final result with web augmentation
+						result = {
+							'answer': combined_answer,
+							'sources': sources + web_results.get('sources', []),
 					'web_search_used': True,
 					'web_search_triggered': True,
-					'web_search_info': {
-						'routing_reason': routing_decision['reason'],
-						'web_sources': web_results.get('sources', []),
-						'local_sources': [doc.metadata.get('source', 'unknown') for doc in docs]
-					}
-				}
-			else:
-				# Generate answer using only local context
-				answer = self.generate_answer(query, context)
+							'evaluation': evaluation,
+							'self_rag': self_rag_results,
+							'processing_time': time.time() - start_time
+						}
+						
+						# Store in cache if enabled
+						if self.cache_enabled and self.semantic_cache:
+							self.semantic_cache.put(query, result)
+						
+						return result
 				
-				# Evaluate the answer if enabled
-				if self.evaluate and not self.test_mode:
-					evaluation = self.evaluate_answer(query, context, answer)
+				# If evaluation is poor but web search not available, try corrective RAG
+				if (evaluation.get('context_sufficiency', 0) < 0.7 or 
+					evaluation.get('completeness', 0) < 0.7) and self.enable_corrective_rag:
+					
+					logger.info("Using corrective RAG to improve answer quality")
+					
+					# Apply corrective RAG
+					corrective_results = self.corrective_rag(
+						query, context, answer, evaluation, self_rag_results
+					)
+					
+					if corrective_results.get("corrected", False):
+						# Use the corrected answer
+						answer = corrective_results.get("answer", answer)
+						evaluation = corrective_results.get("evaluation", evaluation)
 				else:
 					evaluation = None
-				
-				return {
+				self_rag_results = None
+
+			# Final result
+			result = {
 					'answer': answer,
-					'sources': [doc.metadata.get('source', 'unknown') for doc in docs],
+				'sources': sources,
 					'web_search_used': False,
 					'web_search_triggered': False,
-					'evaluation': evaluation
-				}
-				
+				'evaluation': evaluation,
+				'self_rag': self_rag_results,
+				'db_type': db_type,
+				'processing_time': time.time() - start_time
+			}
+			
+			# Store in cache if enabled
+			if self.cache_enabled and self.semantic_cache:
+				self.semantic_cache.put(query, result)
+			
+			return result
+			
 		except Exception as e:
 			logger.error(f"Error processing query: {str(e)}", exc_info=True)
 			return {
@@ -1533,45 +2274,46 @@ class AgenticRetrieval(RAG_Pipeline):
 				'sources': [],
 				'web_search_used': False,
 				'web_search_triggered': False,
-				'evaluation': None
+				'evaluation': None,
+				'error': str(e)
 			}
 
 	def process_youtube_query(self, query: str, video_url: str) -> Dict[str, Any]:
 		"""
 		Process a query specifically for a YouTube video.
-		
+
 		Args:
 			query: User's query about the video content
 			video_url: URL of the YouTube video
-			
+
 		Returns:
 			Dictionary containing answer and relevant video segments
 		"""
 		try:
 			# Process the video and find relevant segments
 			segments, error = self.youtube_processor.process_video(video_url, query)
-			
+
 			if error:
 				return {
 					'answer': f"Error processing video: {error}",
 					'segments': [],
 					'video_url': video_url
 				}
-			
+
 			# Format the response
 			response = []
 			for segment in segments:
 				timestamp_link = f"{video_url}{segment['url_time']}"
 				response.append(f"At {segment['timestamp']}: {segment['text']} [Link]({timestamp_link})")
-			
+
 			answer = "\n\nRelevant segments from the video:\n\n" + "\n\n".join(response)
-			
+
 			return {
 				'answer': answer,
 				'segments': segments,
 				'video_url': video_url
 			}
-				
+
 		except Exception as e:
 			logger.error(f"Error processing YouTube query: {e}")
 			return {
@@ -1584,36 +2326,36 @@ class AgenticRetrieval(RAG_Pipeline):
 		"""
 		Process a query using the ConversationalAgent to maintain conversation history
 		and handle follow-up questions.
-   	 
+
 		Args:
 			query: The user's query
-	   	 
+
 		Returns:
 			A dictionary containing the answer, sources, and other information
 		"""
 		logger.info("Processing query through conversational agent")
-   	 
+
 		# Use the conversational agent to process the query
 		result = self.conversational_agent.query(query)
-   	 
+
 		# Return the result
 		return result
-	
+
 	def create_langchain_runnable(self):
 		def _rewrite_query(query):
 			if self.rewrite_query:
 				return self.rewrite_user_query(query)
 			return query
-   	 
+
 		def _retrieve(query):
 			return self.retrieve_documents(query)
-   	 
+
 		def _format_docs(docs):
 			return "\n\n".join([doc.page_content for doc in docs])
-   	 
+
 		def _generate_answer(inputs):
 			return self.generate_answer(inputs["query"], inputs["context"])
-   	 
+
 		def _evaluate_answer(inputs):
 			if self.evaluate:
 				return {
@@ -1623,14 +2365,14 @@ class AgenticRetrieval(RAG_Pipeline):
 					)
 				}
 			return {"answer": inputs["answer"]}
-   	 
+
 		def _self_rag_evaluation(inputs):
 			self_rag_results = self.self_rag_evaluation(
 				inputs["query"], inputs["context"], inputs["answer"]
 			)
 			inputs["self_rag"] = self_rag_results
 			return inputs
-   	 
+
 		def _corrective_rag(inputs):
 			if self.enable_corrective_rag and self.evaluate:
 				corrective_results = self.corrective_rag(
@@ -1640,7 +2382,7 @@ class AgenticRetrieval(RAG_Pipeline):
 					inputs["evaluation"],
 					inputs["self_rag"]
 				)
-		   	 
+
 				if corrective_results.get("corrected", False):
 					return {
 						"query": inputs["query"],
@@ -1650,9 +2392,9 @@ class AgenticRetrieval(RAG_Pipeline):
 						"self_rag": corrective_results["self_rag"],
 						"corrective": {"corrected": True, "correction_reason": corrective_results["correction_reason"]}
 					}
-	   	 
+
 			return inputs
-   	 
+
 		rewrite = RunnableLambda(_rewrite_query)
 		retrieve = RunnableLambda(_retrieve)
 		format_docs = RunnableLambda(_format_docs)
@@ -1660,7 +2402,7 @@ class AgenticRetrieval(RAG_Pipeline):
 		evaluate = RunnableLambda(_evaluate_answer)
 		self_rag = RunnableLambda(_self_rag_evaluation)
 		corrective = RunnableLambda(_corrective_rag)
-   	 
+
 		chain = (
 			{"query": RunnablePassthrough(), "rewritten_query": rewrite}
 			| {"query": lambda x: x["query"], "context": lambda x: retrieve(x["rewritten_query"]) | format_docs}
@@ -1669,27 +2411,413 @@ class AgenticRetrieval(RAG_Pipeline):
 			| self_rag
 			| corrective
 		)
-   	 
+
 		return chain
+
+	def extract_metadata_filters(self, query: str) -> Dict[str, Any]:
+		"""Extract metadata filters from the query using LLM."""
+		logger.info(f"Extracting metadata filters for query: {query}")
+		
+		prompt = """
+		Extract relevant metadata filters from the following query for document retrieval.
+		Consider filters like:
+		- topic/subject area
+		- specific entities or concepts
+		- temporal information
+		- document type/format
+		- mathematical concepts or theorems
+		
+		Query: {query}
+		
+		Output a JSON object with the following structure:
+		{
+			"topic": str,  # Main topic or subject area
+			"entities": List[str],  # Key entities or concepts
+			"temporal": str | None,  # Any time-related information
+			"doc_type": str | None,  # Type of document needed
+			"math_concepts": List[str]  # Mathematical concepts mentioned
+		}
+		"""
+		
+		messages = [
+			{"role": "system", "content": "You are an expert at analyzing queries and extracting structured metadata."},
+			{"role": "user", "content": prompt.format(query=query)}
+		]
+		
+		try:
+			result = self.llm.invoke(messages).content
+			filters = json.loads(result)
+			logger.info(f"Extracted filters: {filters}")
+			return filters
+		except Exception as e:
+			logger.warning(f"Error extracting metadata filters: {e}")
+			return {}
+
+	def decompose_query(self, query: str) -> List[Dict[str, str]]:
+		"""Decompose complex queries into simpler sub-questions."""
+		logger.info(f"Decomposing query: {query}")
+		
+		prompt = """
+		Decompose the following question into simpler sub-questions that together will help answer the main question.
+		For each sub-question, also indicate its type and purpose.
+		
+		Question: {query}
+		
+		Output a JSON list of objects with the following structure:
+		[
+			{
+				"sub_question": str,  # The actual sub-question
+				"type": str,  # One of: "factual", "conceptual", "procedural", "definitional"
+				"purpose": str  # How this sub-question helps answer the main question
+			}
+		]
+		
+		Example output:
+		[
+			{
+				"sub_question": "What is the definition of a vector norm?",
+				"type": "definitional",
+				"purpose": "Establish basic understanding"
+			},
+			{
+				"sub_question": "How is the L2 norm calculated?",
+				"type": "procedural",
+				"purpose": "Understand specific implementation"
+			}
+		]
+		"""
+		
+		messages = [
+			{"role": "system", "content": "You are an expert at breaking down complex questions into simpler components."},
+			{"role": "user", "content": prompt.format(query=query)}
+		]
+		
+		try:
+			result = self.llm.invoke(messages).content
+			sub_questions = json.loads(result)
+			logger.info(f"Decomposed into {len(sub_questions)} sub-questions")
+			return sub_questions
+		except Exception as e:
+			logger.warning(f"Error decomposing query: {e}")
+			return [{"sub_question": query, "type": "general", "purpose": "main question"}]
+
+	def rerank_documents(self, query: str, docs: List[Document], top_k: int = 5) -> List[Document]:
+		"""Rerank documents using LLM-based relevance scoring."""
+		if not docs:
+			return []
+			
+		logger.info(f"Reranking {len(docs)} documents for query: {query}")
+		
+		prompt = """
+		Rate the relevance of each document to the query on a scale of 0-10.
+		Consider:
+		1. Direct answer presence
+		2. Supporting information quality
+		3. Technical accuracy
+		4. Contextual relevance
+		
+		Query: {query}
+		
+		Documents:
+		{docs}
+		
+		Output a JSON list of scores in order, like: [7, 4, 9, ...]
+		"""
+		
+		# Format documents for the prompt
+		doc_texts = []
+		for i, doc in enumerate(docs):
+			# Truncate document content to avoid token limits
+			content = doc.page_content[:500] + ("..." if len(doc.page_content) > 500 else "")
+			doc_texts.append(f"Document {i+1}:\n{content}\n")
+		
+		messages = [
+			{"role": "system", "content": "You are an expert at evaluating document relevance for technical queries."},
+			{"role": "user", "content": prompt.format(
+				query=query,
+				docs="\n---\n".join(doc_texts)
+			)}
+		]
+		
+		try:
+			result = self.llm.invoke(messages).content
+			scores = json.loads(result)
+			
+			# Pair documents with their scores and sort
+			doc_scores = list(zip(docs, scores))
+			doc_scores.sort(key=lambda x: x[1], reverse=True)
+			
+			# Return top_k documents
+			reranked_docs = [doc for doc, _ in doc_scores[:top_k]]
+			logger.info(f"Reranked documents, returning top {top_k}")
+			return reranked_docs
+			
+		except Exception as e:
+			logger.warning(f"Error reranking documents: {e}")
+			return docs[:top_k]
+
+	def determine_query_type(self, query: str) -> Dict[str, Any]:
+		"""Determine the type of query and best database to use."""
+		logger.info(f"Determining query type for: {query}")
+		
+		prompt = """
+		Analyze the following query and determine:
+		1. The most appropriate database type to use
+		2. Whether it requires multi-hop reasoning
+		3. The complexity level
+		4. Whether it needs external knowledge
+		
+		Query: {query}
+		
+		Output a JSON object with the following structure:
+		{{
+			"db_type": str,  # One of: "vector_db", "relational_db", "graph_db"
+			"multi_hop": bool,  # Whether query needs multiple steps
+			"complexity": str,  # One of: "simple", "moderate", "complex"
+			"needs_external": bool  # Whether external knowledge is needed
+		}}
+		
+		Consider:
+		- Use vector_db for semantic similarity and concept understanding
+		- Use relational_db for structured data and numerical computations
+		- Use graph_db for relationship queries and path finding
+		"""
+		
+		messages = [
+			{"role": "system", "content": "You are an expert at analyzing query structure and requirements."},
+			{"role": "user", "content": prompt.format(query=query)}
+		]
+		
+		try:
+			result = self.llm.invoke(messages).content
+			analysis = json.loads(result)
+			logger.info(f"Query analysis: {analysis}")
+			return analysis
+		except Exception as e:
+			logger.warning(f"Error determining query type: {e}")
+			return {
+				"db_type": "vector_db",
+				"multi_hop": False,
+				"complexity": "simple",
+				"needs_external": False
+			}
+
+	def generate_sql_query(self, query: str) -> str:
+		"""Generate SQL query from natural language for relational database."""
+		logger.info(f"Generating SQL for query: {query}")
+		
+		prompt = """
+		Translate the following natural language query to SQL.
+		Assume a database with tables for:
+		- documents (id, title, content, date, author, source)
+		- topics (id, name, description)
+		- document_topics (document_id, topic_id)
+		
+		Query: {query}
+		
+		Output only the SQL query without explanation.
+		"""
+		
+		messages = [
+			{"role": "system", "content": "You are an expert SQL engineer."},
+			{"role": "user", "content": prompt.format(query=query)}
+		]
+		
+		try:
+			sql_query = self.llm.invoke(messages).content.strip()
+			logger.info(f"Generated SQL: {sql_query}")
+			return sql_query
+		except Exception as e:
+			logger.warning(f"Error generating SQL: {e}")
+			return "SELECT * FROM documents LIMIT 5"
+
+	def generate_cypher_query(self, query: str) -> str:
+		"""Generate Cypher query from natural language for graph database."""
+		logger.info(f"Generating Cypher for query: {query}")
+		
+		prompt = """
+		Translate the following natural language query to Cypher (Neo4j).
+		Assume a graph with nodes:
+		- Document (properties: title, content, date)
+		- Topic (properties: name, description)
+		- Concept (properties: name, definition)
+		And relationships:
+		- (Document)-[:COVERS]->(Topic)
+		- (Document)-[:MENTIONS]->(Concept)
+		- (Topic)-[:INCLUDES]->(Concept)
+		
+		Query: {query}
+		
+		Output only the Cypher query without explanation.
+		"""
+		
+		messages = [
+			{"role": "system", "content": "You are an expert Neo4j engineer."},
+			{"role": "user", "content": prompt.format(query=query)}
+		]
+		
+		try:
+			cypher_query = self.llm.invoke(messages).content.strip()
+			logger.info(f"Generated Cypher: {cypher_query}")
+			return cypher_query
+		except Exception as e:
+			logger.warning(f"Error generating Cypher: {e}")
+			return "MATCH (d:Document) RETURN d LIMIT 5"
+
+	def retrieve_with_metadata_filters(self, query: str, filters: Dict[str, Any]) -> List[Document]:
+		"""Retrieve documents using both semantic search and metadata filters."""
+		logger.info(f"Retrieving with metadata filters: {filters}")
+		
+		if not filters or not self.retriever:
+			# Fallback to regular retrieval if no filters or retriever
+			return self.retrieve_documents(query)
+		
+		try:
+			# Convert filter dict to filter functions
+			filter_funcs = []
+			
+			if "topic" in filters and filters["topic"]:
+				topic = filters["topic"].lower()
+				filter_funcs.append(
+					lambda doc: topic in doc.page_content.lower() or 
+							   topic in str(doc.metadata.get("source", "")).lower()
+				)
+			
+			if "entities" in filters and filters["entities"]:
+				entities = [e.lower() for e in filters["entities"]]
+				filter_funcs.append(
+					lambda doc: any(entity in doc.page_content.lower() for entity in entities)
+				)
+				
+			if "math_concepts" in filters and filters["math_concepts"]:
+				concepts = [c.lower() for c in filters["math_concepts"]]
+				filter_funcs.append(
+					lambda doc: any(concept in doc.page_content.lower() for concept in concepts)
+				)
+			
+			# Get documents from retriever
+			docs = self.retriever.get_relevant_documents(query)
+			
+			# Apply filters if we have any
+			if filter_funcs:
+				filtered_docs = []
+				for doc in docs:
+					if all(filter_func(doc) for filter_func in filter_funcs):
+						filtered_docs.append(doc)
+				
+				logger.info(f"Filtered from {len(docs)} to {len(filtered_docs)} documents")
+				return filtered_docs
+			else:
+				return docs
+				
+		except Exception as e:
+			logger.warning(f"Error applying metadata filters: {e}")
+			return self.retrieve_documents(query)
+
+	def execute_db_query(self, query: str, db_type: str, original_query: str) -> List[Document]:
+		"""Execute query on the appropriate database based on type."""
+		logger.info(f"Executing {db_type} query: {query}")
+		
+		try:
+			if db_type == "vector_db":
+				# Just use the main retriever
+				return self.retrieve_documents(query)
+				
+			elif db_type == "relational_db":
+				# Generate and execute SQL
+				sql_query = self.generate_sql_query(original_query)
+				
+				# Pretend to execute SQL (mock implementation)
+				logger.info(f"Would execute SQL: {sql_query}")
+				
+				# Create a document with the "results"
+				return [Document(
+					page_content=f"SQL Query Results for: {original_query}\n\nThis is a placeholder for SQL query results. In a real implementation, this would contain actual data from a relational database.\n\nSQL Query: {sql_query}",
+					metadata={"source": "sql_database", "query": sql_query}
+				)]
+				
+			elif db_type == "graph_db":
+				# Generate and execute Cypher
+				cypher_query = self.generate_cypher_query(original_query)
+				
+				# Pretend to execute Cypher (mock implementation)
+				logger.info(f"Would execute Cypher: {cypher_query}")
+				
+				# Create a document with the "results"
+				return [Document(
+					page_content=f"Graph Database Results for: {original_query}\n\nThis is a placeholder for graph database query results. In a real implementation, this would contain actual data from a graph database.\n\nCypher Query: {cypher_query}",
+					metadata={"source": "graph_database", "query": cypher_query}
+				)]
+			
+			else:
+				logger.warning(f"Unknown database type: {db_type}")
+				return []
+				
+		except Exception as e:
+			logger.error(f"Error executing database query: {e}")
+			return []
+
+	def aggregate_sub_answers(self, sub_questions: List[Dict[str, str]], sub_answers: List[str], original_query: str) -> str:
+		"""Aggregate answers from sub-questions into a final coherent answer."""
+		logger.info(f"Aggregating {len(sub_answers)} sub-answers")
+		
+		# Prepare the sub-question and answer pairs
+		qa_pairs = []
+		for i, (sq, answer) in enumerate(zip(sub_questions, sub_answers)):
+			qa_pairs.append(f"Sub-question {i+1}: {sq['sub_question']}\nAnswer: {answer}")
+		
+		prompt = """
+		You need to synthesize multiple sub-answers into a comprehensive response to the original query.
+		
+		Original query: {original_query}
+		
+		Sub-question and answer pairs:
+		{qa_pairs}
+		
+		Provide a comprehensive answer to the original query by integrating information from all the sub-answers.
+		Ensure the answer is:
+		1. Coherent and flows naturally
+		2. Directly addresses the original query
+		3. Uses information from all sub-answers where relevant
+		4. Maintains mathematical precision and clarity
+		5. Uses a consistent style throughout
+		"""
+		
+		messages = [
+			{"role": "system", "content": "You are an expert at synthesizing information from multiple sources."},
+			{"role": "user", "content": prompt.format(
+				original_query=original_query,
+				qa_pairs="\n\n".join(qa_pairs)
+			)}
+		]
+		
+		try:
+			aggregated_answer = self.llm.invoke(messages).content
+			logger.info("Successfully aggregated sub-answers")
+			return aggregated_answer
+		except Exception as e:
+			logger.error(f"Error aggregating sub-answers: {e}")
+			# Fallback to concatenation
+			return f"Answer to '{original_query}':\n\n" + "\n\n".join(sub_answers)
 
 class PowerPointPDFLoader:
     """Custom PDF loader optimized for PowerPoint-converted PDFs"""
-    
+
     def __init__(self, file_path: str):
         self.file_path = file_path
-        
+
     def load(self) -> List[Document]:
         """Load and process the PDF file"""
         documents = []
         reader = PdfReader(self.file_path)
-        
+
         for page_num, page in enumerate(reader.pages):
             # Extract text from the page
             text = page.extract_text()
-            
+
             # Clean and format the text
             text = self._clean_text(text)
-            
+
             # Create a document with metadata
             doc = Document(
                 page_content=text,
@@ -1700,34 +2828,34 @@ class PowerPointPDFLoader:
                 }
             )
             documents.append(doc)
-            
+
         return documents
-    
+
     def _clean_text(self, text: str) -> str:
         """Clean and format the text from PowerPoint-converted PDFs"""
         # Remove multiple newlines
         text = re.sub(r'\n\s*\n', '\n\n', text)
-        
+
         # Remove page numbers and headers/footers
         text = re.sub(r'Page \d+ of \d+', '', text)
         text = re.sub(r'\d+/\d+', '', text)
-        
+
         # Remove bullet points and numbering
         text = re.sub(r'^[\s•\-\d\.]+', '', text, flags=re.MULTILINE)
-        
+
         # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text).strip()
-        
+
         return text
 
 if __name__ == "__main__":
 	import asyncio
 	import os
 	import sys
-	
+
 	async def test_vector_norms(agentic_rag):
 		print("\n===== Testing Vector Norm Queries =====\n")
-   	 
+
 		test_queries = [
 			"What is the L2 norm of a vector?",
 			"Explain the difference between L1 and L2 norms",
@@ -1735,14 +2863,14 @@ if __name__ == "__main__":
 			"What is the relationship between vector norms and distance metrics?",
 			"How are norms used in regularization for machine learning?"
 		]
-   	 
+
 		results = []
 		for i, query in enumerate(test_queries):
 			print(f"\n\n===== Query {i+1}: {query} =====")
-	   	 
+
 			print("\nRetrieving documents...")
 			docs = agentic_rag.retrieve_documents(query)
-	   	 
+
 			sources = {}
 			for doc in docs:
 				source = doc.metadata.get('source', 'unknown')
@@ -1751,20 +2879,20 @@ if __name__ == "__main__":
 					sources[source_name] += 1
 				else:
 					sources[source_name] = 1
-	   	 
+
 			print(f"Retrieved {len(docs)} documents")
 			print(f"Documents by source: {sources}")
-	   	 
+
 			if docs:
 				print(f"\nBrief document preview (from {docs[0].metadata.get('source', 'unknown')}):")
 				print(f"{docs[0].page_content[:100]}...")
-	   	 
+
 			if not agentic_rag.test_mode:
 				try:
 					print("\nGenerating answer...")
 					result = agentic_rag.invoke(query)
 					print("\nAnswer:", result["answer"])
-			   	 
+
 					# Print evaluation metrics in a concise format if available
 					if "evaluation" in result and result["evaluation"]:
 						print("\n--- RAG Evaluation Results ---")
@@ -1774,49 +2902,49 @@ if __name__ == "__main__":
 						print(f"Completeness: {eval_metrics.get('completeness', 0.0):.2f}")
 						print(f"Hallucination Score: {eval_metrics.get('hallucination', 0.0):.2f}")
 						print(f"Overall Confidence: {eval_metrics.get('confidence', 0.0):.2f}")
-			   	 
+
 					results.append(result)
 				except Exception as e:
 					print(f"Error generating answer: {e}")
-	   	 
+
 			print("\n" + "-"*50)
-   	 
+
 		return results
-	
+
 	async def main():
 		script_dir = os.path.dirname(os.path.abspath(__file__))
 		default_pdf_folder = os.path.join(script_dir, "../data/")
 		default_persist_dir = os.path.join(script_dir, "./chroma_db")
-   	 
+
 		print("\n=== Agentic RAG Chatbot ===\n")
 		print("Initializing with document folder:", default_pdf_folder)
-   	 
+
 		# Ask if web search should be enabled
 		web_search_enabled = False
 		web_search_input = input("Enable web search fallback? (y/n, default: n): ")
 		if web_search_input.lower() == 'y':
 			web_search_enabled = True
 			print("Web search fallback enabled - will search the web when local context is insufficient.")
-   	 
+
 		test_mode = False
 		test_mode_input = input("Run in test mode to avoid API quota limits? (y/n, default: n): ")
 		if test_mode_input.lower() == 'y':
 			test_mode = True
 			print("Running in test mode - API calls for answer generation will be disabled.")
-   	 
+
 		verbose_mode = False
 		verbose_input = input("Enable verbose output? (y/n, default: n): ")
 		if verbose_input.lower() == 'y':
 			verbose_mode = True
 			print("Verbose output enabled - detailed logs will be shown.")
-   	 
+
 		# Ask if conversation mode should be used
 		conversation_mode = False
 		conversation_input = input("Use conversation mode with history? (y/n, default: n): ")
 		if conversation_input.lower() == 'y':
 			conversation_mode = True
 			print("Conversation mode enabled - will maintain history for follow-up questions.")
-	   	 
+
 		# Ask if web search should be enabled in test mode
 		enable_web_test = False
 		if test_mode and web_search_enabled:
@@ -1824,7 +2952,7 @@ if __name__ == "__main__":
 			if web_test_input.lower() == 'y':
 				enable_web_test = True
 				print("Web search in test mode enabled - will perform web searches even in test mode when needed.")
-   	 
+
 		agentic_rag = AgenticRetrieval(
 			pdf_folder=default_pdf_folder,
 			chunk_size=500,
@@ -1850,44 +2978,44 @@ if __name__ == "__main__":
 			cache_similarity_threshold=0.9,
 			max_cache_size=1000,
 		)
-   	 
+
 		print("Setting up the RAG pipeline...")
 		setup_success = await agentic_rag.setup()
-   	 
+
 		if not setup_success:
 			print(f"Failed to set up RAG pipeline with folder: {agentic_rag.pdf_folder}")
 			return
-   	 
+
 		print(f"\nRAG pipeline ready with {agentic_rag.document_count} documents.")
 		print("\n=== Chat Interface ===")
 		print("Ask any question about the documents in your data folder.")
 		print("Type 'exit' to quit.")
-   	 
+
 		while True:
 			query = input("\nYou: ")
-	   	 
+
 			if query.lower() in ["exit", "quit", "q"]:
 				print("\nGoodbye!")
 				break
-	   	 
+
 			if not query:
 				continue
-	   	 
+
 			print("\nProcessing...")
 			try:
 				# Use conversation mode if enabled
 				if conversation_mode:
 					result = agentic_rag.chat(query)
 					print(f"\nChatbot: {result['answer']}")
-			   	 
+
 					# Print if this was a follow-up question
 					if "is_followup" in result and result["is_followup"]:
 						print("\n[Detected as a follow-up question]")
-			   	 
+
 					# Print if the query was rewritten
 					if "processed_query" in result and result["processed_query"] != query:
 						print(f"\n[Query was rewritten to: {result['processed_query']}]")
-			   	 
+
 					# Print sources in a concise format
 					if "sources" in result and result["sources"]:
 						print("\nSources:")
@@ -1902,14 +3030,14 @@ if __name__ == "__main__":
 					result = await agentic_rag.invoke(query)
 					if result:  # Add null check
 						print(f"\nChatbot: {result.get('answer', 'No answer available')}")
-						
+
 						# Print if web search was triggered or used
 						if result.get("web_search_triggered"):
 							print(f"\n[Web search was triggered: {result.get('web_search_info', {}).get('routing_reason', 'Unknown reason')}]")
-							
+
 							if result.get("web_search_used"):
 								print("\n[Web search results were used to enhance the answer]")
-						
+
 						# Print sources in a concise format
 						sources = result.get("sources", [])
 						if sources:
@@ -1919,7 +3047,7 @@ if __name__ == "__main__":
 								print(f"  {i}. {source_name}")
 							if len(sources) > 5:
 								print(f"  ... and {len(sources) - 5} more")
-						
+
 						# Print evaluation metrics if available
 						evaluation = result.get("evaluation")
 						if evaluation:
@@ -1933,5 +3061,5 @@ if __name__ == "__main__":
 						print("\nError: No response received")
 			except Exception as e:
 				print(f"\nError: {e}")
-	
+
 	asyncio.run(main())

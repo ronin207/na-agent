@@ -2,6 +2,21 @@
 
 This bot allows users to query lecture notes using a RAG (Retrieval-Augmented Generation) pipeline through Mattermost.
 
+## Project Structure
+
+```
+.
+├── src/                    # Source code directory
+│   ├── mattermost_bot.py   # Mattermost bot implementation
+│   ├── app.py             # RAG pipeline server
+│   └── ...                # Other source files
+├── data/                  # Data directory for lecture notes
+├── chroma_db/             # Vector database storage
+├── requirements.txt       # Python dependencies
+├── start_servers.sh      # Script to start all services
+└── manage_ngrok_service.sh # Script to manage ngrok service
+```
+
 ## Setup Instructions
 
 ### 1. Prerequisites
@@ -14,11 +29,18 @@ This bot allows users to query lecture notes using a RAG (Retrieval-Augmented Ge
 ### 2. Environment Setup
 
 1. Clone the repository
-2. Install dependencies:
+2. Create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Unix/macOS
+   # or
+   .\venv\Scripts\activate  # On Windows
+   ```
+3. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. Copy `.env.example` to `.env` and fill in the required values:
+4. Copy `.env.example` to `.env` and fill in the required values:
    - `MATTERMOST_URL`: Your Mattermost server URL
    - `BOT_TOKEN`: Your Mattermost bot token
    - `GOOGLE_API_KEY`: Your Google API key
@@ -38,12 +60,17 @@ This bot allows users to query lecture notes using a RAG (Retrieval-Augmented Ge
 
 1. Start the RAG pipeline server:
    ```bash
-   python app.py
+   python src/app.py
    ```
 
 2. Start the Mattermost bot server:
    ```bash
-   python mattermost_bot.py
+   python src/mattermost_bot.py
+   ```
+
+   Alternatively, you can use the provided script to start both services:
+   ```bash
+   ./start_servers.sh
    ```
 
 3. The bot will be available in Mattermost using the `/lecture` command
@@ -78,7 +105,7 @@ The bot will respond with:
 
 If you encounter issues:
 
-1. Check the logs of both servers for error messages
+1. Check the logs in the `logs/` directory for error messages
 2. Verify your API keys are correct in the `.env` file
 3. Ensure the Mattermost bot has proper permissions
 4. Check that the lecture notes are properly indexed in the RAG pipeline

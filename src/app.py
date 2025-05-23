@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
         # Initialize RAG pipeline with your configuration
         rag_pipeline = AgenticRetrieval(
             pdf_folder=os.path.join(os.path.dirname(__file__), "data"),
-            persist_directory=os.path.join(project_root, "mattermost/chroma_db"),
+            persist_directory=os.path.join(project_root, "chroma_db"),
             force_rebuild=False,
             verbose=True
         )

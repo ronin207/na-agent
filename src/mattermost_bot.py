@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('mattermost/mattermost_bot.log'),
+        logging.FileHandler('logs/mattermost_bot.log'),
         logging.StreamHandler()
     ]
 )
