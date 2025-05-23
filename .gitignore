@@ -41,6 +41,13 @@ pyvenv.cfg
 ehthumbs.db
 Thumbs.db
 
+# Cursor IDE
+.cursorrules
+.cursor/
+*.cursor
+.cursorignore
+.mdc
+
 # Logs
 *.log
 logs/
@@ -123,3 +130,11 @@ yarn-error.log*
 # New additions
 *.plist
 *.sh
+
+# Specific files to ignore
+=2.28
+codebase.mdc
+
+# Pattern-based ignores
+=*.*
+*.mdc
