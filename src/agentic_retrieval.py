@@ -83,7 +83,7 @@ class RAGFusion:
 
     def final_rag_chain(self, retrieval_chain_rag_fusion):
         """Create the final RAG chain and capture source documents."""
-        template = """Answer the following question based on this context:
+        template = r"""Answer the following question based on this context:
 
         {context}
 
