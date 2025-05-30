@@ -116,3 +116,5 @@ If you encounter issues:
 - Do not commit the `.env` file to version control
 - Regularly rotate your bot tokens
 - Monitor bot usage and implement rate limiting if necessary 
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ronin207/na-agent)
