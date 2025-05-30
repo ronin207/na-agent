@@ -12,8 +12,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 # Load environment variables
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-env_path = os.path.join(project_root, '.env')
+env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
 load_dotenv(env_path)
 
 # Configure logging
@@ -21,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/mattermost_bot.log'),
+        logging.FileHandler('../logs/mattermost_bot.log'),
         logging.StreamHandler()
     ]
 )
