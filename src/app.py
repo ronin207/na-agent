@@ -6,9 +6,6 @@ import os
 import sys
 import logging
 from dotenv import load_dotenv
-import asyncio
-from contextlib import asynccontextmanager
-from flask import request, jsonify
 
 # Add the project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Define request models
 class QueryRequest(BaseModel):
     text: str
+    video_url: str = None
 
 # Load environment variables
 env_path = os.path.join(project_root, '.env')
@@ -35,42 +33,13 @@ os.environ['USER_AGENT'] = 'na-agent/1.0'
 
 # Verify API keys are loaded
 openai_api_key = os.getenv("OPENAI_API_KEY")
-logger.debug(f"OpenAI API Key loaded: {openai_api_key[:10]}...")  
-
-if not openai_api_key:
+if openai_api_key:
+    logger.debug(f"OpenAI API Key loaded: {openai_api_key[:10]}...")  
+else:
     raise ValueError("OPENAI_API_KEY not found in environment variables. Please check your .env file.")
 
-# Initialize RAG pipeline
-rag_pipeline = None
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global rag_pipeline
-    try:
-        # Initialize RAG pipeline with your configuration
-        rag_pipeline = AgenticRetrieval(
-            pdf_folder=os.path.join(project_root, "data"),
-            persist_directory=os.path.join(project_root, "chroma_db"),
-            force_rebuild=False,
-            verbose=True
-        )
-        
-        # Setup the pipeline
-        success = await rag_pipeline.setup()
-        if not success:
-            logger.error("Failed to setup RAG pipeline")
-            raise Exception("Failed to setup RAG pipeline")
-            
-        logger.info("RAG pipeline initialized successfully")
-        yield
-    except Exception as e:
-        logger.error(f"Error initializing RAG pipeline: {e}")
-        raise
-    finally:
-        # Cleanup if needed
-        pass
-
-app = FastAPI(lifespan=lifespan)
+# Initialize FastAPI app
+app = FastAPI()
 
 # Add CORS middleware
 app.add_middleware(
@@ -81,74 +50,90 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize RAG pipeline globally
+rag_pipeline = None
+
+def initialize_rag_pipeline():
+    """Initialize the RAG pipeline"""
+    global rag_pipeline
+    try:
+        rag_pipeline = AgenticRetrieval(
+            pdf_folder=os.path.join(project_root, "data"),
+            persist_directory=os.path.join(project_root, "chroma_db"),
+            force_rebuild=False
+        )
+        logger.info("RAG pipeline initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error initializing RAG pipeline: {e}")
+        return False
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the RAG pipeline on startup"""
+    logger.info("Starting up FastAPI application...")
+    success = initialize_rag_pipeline()
+    if not success:
+        logger.error("Failed to initialize RAG pipeline during startup")
+        raise Exception("Failed to initialize RAG pipeline")
+
 @app.get("/health")
 async def health_check():
+    """Health check endpoint"""
     if rag_pipeline is None:
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     if rag_pipeline.retriever is None:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
-    return {"status": "healthy", "document_count": rag_pipeline.get_document_count()}
+    
+    # Count documents in vectorstore if available
+    try:
+        if rag_pipeline.vectorstore:
+            # Simple way to get document count from Chroma
+            doc_count = len(rag_pipeline.vectorstore.get()['ids'])
+        else:
+            doc_count = 0
+    except:
+        doc_count = "unknown"
+    
+    return {"status": "healthy", "document_count": doc_count}
 
 @app.post("/query")
 async def process_query(query: QueryRequest):
-    if rag_pipeline is None or rag_pipeline.retriever is None:
+    """Process a query through the RAG pipeline"""
+    if rag_pipeline is None:
         logger.error("RAG pipeline not initialized")
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    
+    if rag_pipeline.retriever is None:
+        logger.error("Vector store not initialized")
+        raise HTTPException(status_code=503, detail="Vector store not initialized")
     
     try:
         # Log the incoming request
         logger.info(f"Received query request: {query.dict()}")
         
-        # Process the query
+        # Process the query using the existing invoke method
         logger.info(f"Processing query: {query.text}")
-        response = await rag_pipeline.invoke(query.text)
+        response = rag_pipeline.invoke(query.text)
         
         # Log the response
-        logger.info(f"Generated response: {response}")
+        logger.info(f"Generated response keys: {response.keys()}")
         
-        result = {"response": response.get('answer', 'No answer found')}
-        logger.info(f"Returning result: {result}")
+        # Return the formatted result
+        result = {
+            "response": response.get('answer', 'No answer found'),
+            "sources": response.get('sources', []),
+            "web_search_used": response.get('web_search_used', False),
+            "datasource": response.get('datasource', 'unknown')
+        }
+        
+        logger.info(f"Returning result with response length: {len(result['response'])}")
         return result
         
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}")
         logger.exception("Full exception details:")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.route('/query', methods=['POST'])
-def query():
-    try:
-        data = request.get_json()
-        if not data or 'text' not in data:
-            return jsonify({'error': 'No query provided'}), 400
-        
-        query_text = data['text']
-        video_url = data.get('video_url')  # Get video URL if provided
-        
-        # Process the query
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            # Call invoke with video_url if provided
-            result = loop.run_until_complete(rag_pipeline.invoke(query_text, video_url))
-            
-            # Format the response
-            response = result.get('answer', 'No answer found')
-            
-            return jsonify({
-                'response': response,
-                'sources': result.get('sources', []),
-                'web_search_used': result.get('web_search_used', False),
-                'web_search_triggered': result.get('web_search_triggered', False)
-            })
-            
-        finally:
-            loop.close()
-            
-    except Exception as e:
-        logger.error(f"Error processing query: {e}")
-        return jsonify({'error': str(e)}), 500
 
 if __name__ == "__main__":
     # Verify environment variables
