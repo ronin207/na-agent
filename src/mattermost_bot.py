@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify
 import websocket
 import time
 import re
-from typing import Optional
+from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -41,6 +41,57 @@ logger.info(f"BOT_USERNAME: {BOT_USERNAME}")
 
 # Initialize Flask app
 app = Flask(__name__)
+
+# Thread-aware conversation storage
+# Structure: {thread_id: conversation_data}
+thread_conversations = {}
+
+class ThreadManager:
+    """Manages conversation threads and integrates with the conversational agent"""
+    
+    def __init__(self):
+        self.threads = {}
+    
+    def get_or_create_thread(self, thread_id: str, channel_id: str, user_name: str) -> Dict[str, Any]:
+        """Get existing thread conversation or create a new one"""
+        if thread_id not in self.threads:
+            self.threads[thread_id] = {
+                'thread_id': thread_id,
+                'channel_id': channel_id,
+                'user_name': user_name,
+                'created_at': time.time(),
+                'last_activity': time.time(),
+                'message_count': 0,
+                'conversation_active': True
+            }
+            logger.info(f"Created new thread conversation: {thread_id}")
+        else:
+            # Update last activity
+            self.threads[thread_id]['last_activity'] = time.time()
+            self.threads[thread_id]['message_count'] += 1
+        
+        return self.threads[thread_id]
+    
+    def is_thread_conversation(self, thread_id: str) -> bool:
+        """Check if this is part of an ongoing thread conversation"""
+        return thread_id in self.threads and self.threads[thread_id]['conversation_active']
+    
+    def cleanup_old_threads(self, max_age_hours: int = 24):
+        """Remove old inactive threads"""
+        current_time = time.time()
+        max_age_seconds = max_age_hours * 3600
+        
+        threads_to_remove = []
+        for thread_id, thread_data in self.threads.items():
+            if current_time - thread_data['last_activity'] > max_age_seconds:
+                threads_to_remove.append(thread_id)
+        
+        for thread_id in threads_to_remove:
+            del self.threads[thread_id]
+            logger.info(f"Cleaned up old thread: {thread_id}")
+
+# Initialize thread manager
+thread_manager = ThreadManager()
 
 @app.route('/health')
 def health_check():
@@ -166,12 +217,106 @@ def extract_youtube_url(text: str) -> Optional[str]:
             return match.group(0)
     return None
 
-def process_query(text, channel_id, user_name, root_id=None):
-    """Process a query and return the response"""
+def get_post_details(post_id: str) -> Optional[Dict[str, Any]]:
+    """Get post details from Mattermost API to determine thread information"""
+    try:
+        headers = {
+            'Authorization': f'Bearer {BOT_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(
+            f'{MATTERMOST_URL}/api/v4/posts/{post_id}',
+            headers=headers
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logger.warning(f"Failed to get post details for {post_id}: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting post details: {e}")
+        return None
+
+def extract_thread_info(data: Dict[str, Any]) -> tuple[Optional[str], bool]:
+    """
+    Extract thread information from webhook data
+    Returns: (thread_root_id, is_thread_reply)
+    """
+    thread_root_id = None
+    is_thread_reply = False
+    
+    # Method 1: Check if there's a root_id in the webhook data
+    if 'root_id' in data and data['root_id']:
+        thread_root_id = data['root_id']
+        is_thread_reply = True
+        logger.info(f"Thread reply detected via root_id: {thread_root_id}")
+        return thread_root_id, is_thread_reply
+    
+    # Method 2: Check for post data and extract root_id
+    if 'post' in data:
+        try:
+            if isinstance(data['post'], str):
+                post_data = json.loads(data['post'])
+            else:
+                post_data = data['post']
+            
+            if 'root_id' in post_data and post_data['root_id']:
+                thread_root_id = post_data['root_id']
+                is_thread_reply = True
+                logger.info(f"Thread reply detected via post.root_id: {thread_root_id}")
+            elif 'id' in post_data:
+                # This could be the start of a new thread
+                thread_root_id = post_data['id']
+                is_thread_reply = False
+                logger.info(f"Potential new thread detected: {thread_root_id}")
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Error parsing post data for thread info: {e}")
+    
+    # Method 3: Try to get post details from API if we have a post_id
+    if not thread_root_id:
+        post_id = data.get('post_id') or data.get('trigger_id')
+        if post_id:
+            post_details = get_post_details(post_id)
+            if post_details:
+                if post_details.get('root_id'):
+                    thread_root_id = post_details['root_id']
+                    is_thread_reply = True
+                    logger.info(f"Thread reply detected via API: {thread_root_id}")
+                else:
+                    thread_root_id = post_details.get('id', post_id)
+                    is_thread_reply = False
+    
+    return thread_root_id, is_thread_reply
+
+def process_query(text, channel_id, user_name, root_id=None, webhook_data=None):
+    """Process a query and return the response with thread support"""
     try:
         if not text:
             send_message(channel_id, "Please provide a query.", root_id=root_id)
             return jsonify({'response_type': 'in_channel'})
+        
+        # Extract thread information
+        thread_root_id, is_thread_reply = extract_thread_info(webhook_data or {})
+        
+        # Use provided root_id if available, otherwise use extracted thread_root_id
+        effective_root_id = root_id or thread_root_id
+        
+        # Determine if this is a conversation thread
+        use_conversational_agent = False
+        thread_id = None
+        
+        if effective_root_id:
+            thread_id = effective_root_id
+            # Check if this is part of an ongoing conversation
+            if thread_manager.is_thread_conversation(thread_id) or is_thread_reply:
+                use_conversational_agent = True
+                # Update thread manager
+                thread_manager.get_or_create_thread(thread_id, channel_id, user_name)
+                logger.info(f"Using conversational agent for thread: {thread_id}")
         
         # Create a stop event for the typing indicator
         stop_typing = Event()
@@ -191,7 +336,10 @@ def process_query(text, channel_id, user_name, root_id=None):
             request_data = {
                 'text': text,
                 'user': user_name,
-                'channel_id': channel_id
+                'channel_id': channel_id,
+                'use_conversational_agent': use_conversational_agent,
+                'thread_id': thread_id,
+                'is_thread_reply': is_thread_reply
             }
             
             # If YouTube URL is found, add it to the request
@@ -199,13 +347,13 @@ def process_query(text, channel_id, user_name, root_id=None):
                 # Remove the URL from the query text
                 query_text = text.replace(youtube_url, '').strip()
                 if not query_text:
-                    send_message(channel_id, "Please provide a question about the video content.", root_id=root_id)
+                    send_message(channel_id, "Please provide a question about the video content.", root_id=effective_root_id)
                     return jsonify({'response_type': 'in_channel'})
                 
                 request_data['text'] = query_text
                 request_data['video_url'] = youtube_url
             
-            logger.info(f"Sending request to RAG pipeline: {json.dumps(request_data)}")
+            logger.info(f"Sending request to RAG pipeline: {json.dumps(request_data, indent=2)}")
             
             # Forward the query to the RAG pipeline with increased timeout
             response = requests.post(
@@ -231,16 +379,29 @@ def process_query(text, channel_id, user_name, root_id=None):
             # Extract the answer from the response
             answer = response_data.get('response', 'I apologize, but I was unable to process your query.')
             
+            # Add thread context indicator if this is a follow-up
+            if use_conversational_agent and is_thread_reply:
+                thread_info = thread_manager.threads.get(thread_id, {})
+                message_count = thread_info.get('message_count', 0)
+                if message_count > 1:
+                    answer = f"🧵 *Thread follow-up #{message_count}*\n\n{answer}"
+            
             # Send the response back to Mattermost
-            send_message(channel_id, answer, root_id=root_id)
+            sent_message = send_message(channel_id, answer, root_id=effective_root_id)
+            
+            # If this was the start of a new thread and we successfully sent a message, 
+            # mark it as a thread conversation
+            if sent_message and not is_thread_reply and effective_root_id:
+                thread_manager.get_or_create_thread(effective_root_id, channel_id, user_name)
+                logger.info(f"Started new thread conversation: {effective_root_id}")
             
             return jsonify({'response_type': 'in_channel'})
             
         except requests.Timeout:
-            send_message(channel_id, "The query took too long to process. Please try again with a simpler query.")
+            send_message(channel_id, "The query took too long to process. Please try again with a simpler query.", root_id=effective_root_id)
         except requests.RequestException as e:
             logger.error(f"Error making request to RAG pipeline: {e}")
-            send_message(channel_id, "Sorry, there was an error processing your query. Please try again later.")
+            send_message(channel_id, "Sorry, there was an error processing your query. Please try again later.", root_id=effective_root_id)
         finally:
             # Stop the typing indicator
             stop_typing.set()
@@ -256,6 +417,37 @@ def process_query(text, channel_id, user_name, root_id=None):
 def test():
     return "Bot is running!"
 
+@app.route('/thread-stats', methods=['GET'])
+def thread_stats():
+    """Get statistics about active threads"""
+    stats = {
+        'active_threads': len(thread_manager.threads),
+        'threads': []
+    }
+    
+    for thread_id, thread_data in thread_manager.threads.items():
+        stats['threads'].append({
+            'thread_id': thread_id,
+            'message_count': thread_data['message_count'],
+            'last_activity': thread_data['last_activity'],
+            'user_name': thread_data['user_name']
+        })
+    
+    return jsonify(stats)
+
+def cleanup_threads_periodically():
+    """Cleanup old threads periodically"""
+    import threading
+    
+    def cleanup():
+        while True:
+            time.sleep(3600)  # Run every hour
+            thread_manager.cleanup_old_threads(max_age_hours=24)
+    
+    cleanup_thread = threading.Thread(target=cleanup, daemon=True)
+    cleanup_thread.start()
+    logger.info("Started periodic thread cleanup")
+
 @app.route('/mattermost', methods=['POST'])
 def mattermost_webhook():
     try:
@@ -266,6 +458,9 @@ def mattermost_webhook():
 
         channel_id = data.get('channel_id', '')
         user_name = data.get('user_name', 'user')
+        
+        # Log the full webhook data for debugging
+        logger.debug(f"Full webhook data: {json.dumps(data, indent=2)}")
         
         # Handle mentions (from outgoing webhook)
         if 'text' in data:
@@ -293,14 +488,17 @@ You can interact with me by:
 Mention me: @knowledge-agent your question here
 Examples:
 
-@knowledge-agent Can you explain the difference between X and Y?"""
+@knowledge-agent Can you explain the difference between X and Y?
+
+💡 **Thread Support**: Ask follow-up questions by replying to my responses in a thread!
+🧵 I'll remember our conversation context within threads for better continuity."""
                         send_message(channel_id, help_message)
                         return jsonify({'response_type': 'in_channel'})
 
                     # Handle greetings
                     if command in ['hi', 'hello', 'hey', 'greetings']:
                         logger.info("Processing greeting command")
-                        greeting_message = f"Hello {user_name}! How can I help you today? :smile:"
+                        greeting_message = f"Hello {user_name}! How can I help you today? :smile:\n\n💡 Tip: You can ask follow-up questions by replying to my responses in a thread!"
                         send_message(channel_id, greeting_message)
                         return jsonify({'response_type': 'in_channel'})
 
@@ -323,15 +521,15 @@ Examples:
                     if post_id is None:
                         post_id = data.get('trigger_id') or data.get('post_id')
 
-                    # Process as regular query
-                    return process_query(query, channel_id, user_name, post_id)
+                    # Process as regular query with full webhook data
+                    return process_query(query, channel_id, user_name, post_id, data)
         
         # Handle slash command
         elif 'command' in data:
             text = data.get('text', '').strip()
             logger.info(f"Processing slash command with text: {text}")
             post_id = data.get('trigger_id') or data.get('post_id')
-            return process_query(text, channel_id, user_name, post_id)
+            return process_query(text, channel_id, user_name, post_id, data)
             
         return jsonify({'response_type': 'ephemeral'})
 
@@ -400,6 +598,13 @@ if __name__ == '__main__':
     
     if missing_vars:
         raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    
+    # Start periodic thread cleanup
+    cleanup_threads_periodically()
+    
+    logger.info("🤖 Mattermost Knowledge Agent Starting...")
+    logger.info("🧵 Thread-aware conversation support enabled")
+    logger.info("💬 Conversational agent integration ready")
     
     # Start the Flask app
     app.run(host='0.0.0.0', port=5002) 

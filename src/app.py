@@ -6,6 +6,8 @@ import os
 import sys
 import logging
 from dotenv import load_dotenv
+import asyncio
+from contextlib import asynccontextmanager
 
 # Add the project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,7 +23,12 @@ logger = logging.getLogger(__name__)
 # Define request models
 class QueryRequest(BaseModel):
     text: str
-    video_url: str = None
+    video_url: str = None  # Optional video URL parameter
+    user: str = None  # Optional user information
+    channel_id: str = None  # Optional channel information
+    use_conversational_agent: bool = False  # Whether to use conversational agent
+    thread_id: str = None  # Thread ID for conversation context
+    is_thread_reply: bool = False  # Whether this is a reply in a thread
 
 # Load environment variables
 env_path = os.path.join(project_root, '.env')
@@ -33,13 +40,35 @@ os.environ['USER_AGENT'] = 'na-agent/1.0'
 
 # Verify API keys are loaded
 openai_api_key = os.getenv("OPENAI_API_KEY")
-if openai_api_key:
-    logger.debug(f"OpenAI API Key loaded: {openai_api_key[:10]}...")  
-else:
+logger.debug(f"OpenAI API Key loaded: {openai_api_key[:10]}...")  
+
+if not openai_api_key:
     raise ValueError("OPENAI_API_KEY not found in environment variables. Please check your .env file.")
 
-# Initialize FastAPI app
-app = FastAPI()
+# Initialize RAG pipeline
+rag_pipeline = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global rag_pipeline
+    try:
+        # Initialize RAG pipeline with correct configuration
+        rag_pipeline = AgenticRetrieval(
+            pdf_folder=os.path.join(project_root, "data"),
+            persist_directory=os.path.join(project_root, "chroma_db"),
+            force_rebuild=False
+        )
+        
+        logger.info("RAG pipeline initialized successfully")
+        yield
+    except Exception as e:
+        logger.error(f"Error initializing RAG pipeline: {e}")
+        raise
+    finally:
+        # Cleanup if needed
+        pass
+
+app = FastAPI(lifespan=lifespan)
 
 # Add CORS middleware
 app.add_middleware(
@@ -50,84 +79,66 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize RAG pipeline globally
-rag_pipeline = None
-
-def initialize_rag_pipeline():
-    """Initialize the RAG pipeline"""
-    global rag_pipeline
-    try:
-        rag_pipeline = AgenticRetrieval(
-            pdf_folder=os.path.join(project_root, "data"),
-            persist_directory=os.path.join(project_root, "chroma_db"),
-            force_rebuild=False
-        )
-        logger.info("RAG pipeline initialized successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Error initializing RAG pipeline: {e}")
-        return False
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the RAG pipeline on startup"""
-    logger.info("Starting up FastAPI application...")
-    success = initialize_rag_pipeline()
-    if not success:
-        logger.error("Failed to initialize RAG pipeline during startup")
-        raise Exception("Failed to initialize RAG pipeline")
-
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     if rag_pipeline is None:
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     if rag_pipeline.retriever is None:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
     
-    # Count documents in vectorstore if available
+    # Get document count safely
     try:
-        if rag_pipeline.vectorstore:
-            # Simple way to get document count from Chroma
-            doc_count = len(rag_pipeline.vectorstore.get()['ids'])
-        else:
-            doc_count = 0
+        doc_count = len(rag_pipeline.vectorstore.get()['ids']) if rag_pipeline.vectorstore else 0
     except:
-        doc_count = "unknown"
+        doc_count = 0
     
     return {"status": "healthy", "document_count": doc_count}
 
 @app.post("/query")
 async def process_query(query: QueryRequest):
-    """Process a query through the RAG pipeline"""
-    if rag_pipeline is None:
+    if rag_pipeline is None or rag_pipeline.retriever is None:
         logger.error("RAG pipeline not initialized")
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
-    if rag_pipeline.retriever is None:
-        logger.error("Vector store not initialized")
-        raise HTTPException(status_code=503, detail="Vector store not initialized")
-    
     try:
         # Log the incoming request
-        logger.info(f"Received query request: {query.dict()}")
+        logger.info(f"Received query request: {query.model_dump()}")
         
-        # Process the query using the existing invoke method
+        # Process the query based on whether conversational agent should be used
         logger.info(f"Processing query: {query.text}")
-        response = rag_pipeline.invoke(query.text)
+        
+        if query.use_conversational_agent and hasattr(rag_pipeline, 'conversational_agent'):
+            # Use conversational agent for threaded conversations
+            logger.info(f"Using conversational agent for thread: {query.thread_id}")
+            response = rag_pipeline.conversational_agent.query(query.text)
+            
+            # Format response for conversational agent
+            result = {
+                "response": response.get('answer', 'No answer found'),
+                "sources": response.get('sources', []),
+                "web_search_used": response.get('web_search_used', False),
+                "datasource": "conversational_agent",
+                "is_followup": response.get('is_followup', False),
+                "thread_id": query.thread_id,
+                "processed_query": response.get('processed_query', query.text)
+            }
+        else:
+            # Use regular RAG pipeline
+            response = rag_pipeline.invoke(query.text)
+            
+            # Format the response to match what mattermost_bot.py expects
+            result = {
+                "response": response.get('answer', 'No answer found'),
+                "sources": response.get('sources', []),
+                "web_search_used": response.get('web_search_used', False),
+                "datasource": response.get('datasource', 'unknown'),
+                "thread_id": query.thread_id
+            }
         
         # Log the response
-        logger.info(f"Generated response keys: {response.keys()}")
+        logger.info(f"Generated response: {result}")
         
-        # Return the formatted result
-        result = {
-            "response": response.get('answer', 'No answer found'),
-            "sources": response.get('sources', []),
-            "web_search_used": response.get('web_search_used', False),
-            "datasource": response.get('datasource', 'unknown')
-        }
-        
-        logger.info(f"Returning result with response length: {len(result['response'])}")
+        logger.info(f"Returning result: {result}")
         return result
         
     except Exception as e:
