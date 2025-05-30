@@ -237,7 +237,10 @@ class AgenticRetrieval:
     
     def _setup_vectorstore(self):
         """Set up the vector store and retriever."""
-        if os.path.exists(self.persist_directory) and not self.force_rebuild:
+        # Check if we need to rebuild based on data changes
+        needs_rebuild = self._check_if_data_changed()
+        
+        if os.path.exists(self.persist_directory) and not self.force_rebuild and not needs_rebuild:
             logger.info(f"Loading existing vector store from {self.persist_directory}")
             try:
                 self.vectorstore = Chroma(
@@ -250,29 +253,137 @@ class AgenticRetrieval:
             except Exception as e:
                 logger.warning(f"Failed to load existing vector store: {e}. Rebuilding...")
         
-        # Build new vector store
-        logger.info("Building new vector store")
+        if needs_rebuild:
+            logger.info("Data folder has been modified since last build. Rebuilding vector store...")
+        elif self.force_rebuild:
+            logger.info("Force rebuild requested. Building new vector store...")
+        else:
+            logger.info("Building new vector store...")
+            
         self._build_vectorstore()
     
+    def _check_if_data_changed(self):
+        """Check if data folder has been modified since the last vectorstore build."""
+        import glob
+        import time
+        
+        # Path to store the last build timestamp
+        timestamp_file = os.path.join(self.persist_directory, ".last_build_timestamp")
+        
+        # If vectorstore doesn't exist, we need to build
+        if not os.path.exists(self.persist_directory):
+            return True
+            
+        # If timestamp file doesn't exist, we need to rebuild
+        if not os.path.exists(timestamp_file):
+            return True
+            
+        try:
+            # Get last build timestamp
+            with open(timestamp_file, 'r') as f:
+                last_build_time = float(f.read().strip())
+                
+            # Get modification times of all files in data folder
+            data_files = []
+            data_files.extend(glob.glob(os.path.join(self.pdf_folder, "**/*.pdf"), recursive=True))
+            data_files.extend(glob.glob(os.path.join(self.pdf_folder, "**/*.ipynb"), recursive=True))
+            
+            # Check if any file has been modified since last build
+            for file_path in data_files:
+                if os.path.getmtime(file_path) > last_build_time:
+                    logger.info(f"Detected change in: {os.path.basename(file_path)}")
+                    return True
+                    
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Error checking data changes: {e}. Will rebuild to be safe.")
+            return True
+    
+    def _save_build_timestamp(self):
+        """Save the current timestamp to track when vectorstore was last built."""
+        import time
+        
+        timestamp_file = os.path.join(self.persist_directory, ".last_build_timestamp")
+        try:
+            with open(timestamp_file, 'w') as f:
+                f.write(str(time.time()))
+        except Exception as e:
+            logger.warning(f"Failed to save build timestamp: {e}")
+    
     def _build_vectorstore(self):
-        """Build vector store from documents."""
+        """Build vector store from documents including PDFs and Jupyter notebooks."""
         if not os.path.exists(self.pdf_folder):
-            logger.warning(f"PDF folder {self.pdf_folder} does not exist")
+            logger.warning(f"Data folder {self.pdf_folder} does not exist")
             return
         
-        # Load documents
-        loader = DirectoryLoader(
+        documents = []
+        
+        # Load PDF documents
+        logger.info("Loading PDF documents...")
+        pdf_loader = DirectoryLoader(
             self.pdf_folder,
             glob="**/*.pdf",
             loader_cls=PyPDFLoader,
             use_multithreading=True
         )
-        documents = loader.load()
+        pdf_documents = pdf_loader.load()
+        documents.extend(pdf_documents)
+        logger.info(f"Loaded {len(pdf_documents)} PDF documents")
+        
+        # Load Jupyter notebooks
+        logger.info("Loading Jupyter notebooks...")
+        import json
+        import glob
+        
+        notebook_files = glob.glob(os.path.join(self.pdf_folder, "**/*.ipynb"), recursive=True)
+        
+        for notebook_path in notebook_files:
+            try:
+                with open(notebook_path, 'r', encoding='utf-8') as f:
+                    notebook = json.load(f)
+                
+                # Extract content from notebook cells
+                content_parts = []
+                for cell in notebook.get('cells', []):
+                    if cell.get('cell_type') == 'markdown':
+                        source = cell.get('source', [])
+                        if isinstance(source, list):
+                            content_parts.append(''.join(source))
+                        else:
+                            content_parts.append(source)
+                    elif cell.get('cell_type') == 'code':
+                        source = cell.get('source', [])
+                        if isinstance(source, list):
+                            code_content = ''.join(source)
+                        else:
+                            code_content = source
+                        if code_content.strip():  # Only add non-empty code
+                            content_parts.append(f"```python\n{code_content}\n```")
+                
+                # Create document from notebook content
+                if content_parts:
+                    full_content = '\n\n'.join(content_parts)
+                    doc = Document(
+                        page_content=full_content,
+                        metadata={
+                            'source': os.path.basename(notebook_path),
+                            'type': 'jupyter_notebook'
+                        }
+                    )
+                    documents.append(doc)
+                    
+            except Exception as e:
+                logger.warning(f"Failed to load notebook {notebook_path}: {e}")
+        
+        logger.info(f"Loaded {len(notebook_files)} Jupyter notebooks")
         
         if not documents:
             logger.warning("No documents found")
             return
-        
+
+        logger.info(f"Total documents loaded: {len(documents)}")
+
         # Split documents
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
@@ -290,6 +401,9 @@ class AgenticRetrieval:
         
         self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.k})
         logger.info(f"Vector store built with {len(chunks)} chunks")
+        
+        # Save build timestamp
+        self._save_build_timestamp()
     
     def choose_route(self, question: str, result: RouteQuery) -> Dict[str, Any]:
         """Choose the appropriate route based on the routing decision."""
