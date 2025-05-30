@@ -82,7 +82,7 @@ class RAGFusion:
         return retrieval_chain_rag_fusion
 
     def final_rag_chain(self, retrieval_chain_rag_fusion):
-        """Create the final RAG chain."""
+        """Create the final RAG chain and capture source documents."""
         template = """Answer the following question based on this context:
 
         {context}
@@ -100,15 +100,42 @@ class RAGFusion:
 
         prompt = ChatPromptTemplate.from_template(template)
 
+        # Get the ranked documents from retrieval chain
+        ranked_docs = retrieval_chain_rag_fusion.invoke({"question": self.question})
+        
+        # Extract just the documents for context
+        context_docs = [doc for doc, score in ranked_docs[:5]]  # Use top 5 docs
+        context_text = "\n\n".join([doc.page_content for doc in context_docs])
+        
+        # Generate the answer
         final_rag_chain = (
-            {"context": retrieval_chain_rag_fusion, "question": itemgetter("question")}
+            {"context": lambda x: context_text, "question": itemgetter("question")}
             | prompt
             | self.llm
             | StrOutputParser()
         )
 
         rag_fusion_answer = final_rag_chain.invoke({"question": self.question})
-        return rag_fusion_answer
+        
+        # Extract source information
+        sources = []
+        for doc in context_docs:
+            source_info = doc.metadata.get('source', 'Unknown source')
+            # Extract just the filename from the full path
+            if '/' in source_info:
+                source_info = source_info.split('/')[-1]
+            sources.append(source_info)
+        
+        # Remove duplicates while preserving order
+        unique_sources = []
+        for source in sources:
+            if source not in unique_sources:
+                unique_sources.append(source)
+        
+        return {
+            "answer": rag_fusion_answer,
+            "sources": unique_sources
+        }
 
 class WebSearch:
     def __init__(self, client: OpenAI):
@@ -264,13 +291,16 @@ class AgenticRetrieval:
         self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.k})
         logger.info(f"Vector store built with {len(chunks)} chunks")
     
-    def choose_route(self, question: str, result: RouteQuery) -> str:
+    def choose_route(self, question: str, result: RouteQuery) -> Dict[str, Any]:
         """Choose the appropriate route based on the routing decision."""
         datasource = result.datasource
         
         if "local_documents" in datasource.lower():
             if self.retriever is None:
-                return "Sorry, the document retrieval system is not available."
+                return {
+                    "answer": "Sorry, the document retrieval system is not available.",
+                    "sources": []
+                }
             
             ragfusion = RAGFusion(question, self.llm)
             generate_queries = ragfusion.generate_queries()
@@ -279,13 +309,23 @@ class AgenticRetrieval:
                 self.retriever, generate_queries, reciprocal_rank_fusion
             )
             
-            return ragfusion.final_rag_chain(retrieval_chain_rag_fusion)
+            result = ragfusion.final_rag_chain(retrieval_chain_rag_fusion)
+            return {
+                "answer": result["answer"],
+                "sources": result["sources"]
+            }
         
         elif "web_search" in datasource.lower():
-            return self.web_search.web_search(question)
+            return {
+                "answer": self.web_search.web_search(question),
+                "sources": ["web_search"]
+            }
         
         else:
-            return "This information cannot be found in the textbook nor the internet. Please try again!"
+            return {
+                "answer": "This information cannot be found in the textbook nor the internet. Please try again!",
+                "sources": []
+            }
     
     def invoke(self, question: str) -> Dict[str, Any]:
         """
@@ -301,19 +341,19 @@ class AgenticRetrieval:
             # Route the query
             result = self.router.invoke({"question": question})
             
-            # Get the answer
-            answer = self.choose_route(question, result)
+            # Get the answer and sources
+            response = self.choose_route(question, result)
             
             # Determine if web search was used
             web_search_used = "web_search" in result.datasource.lower()
             
             return {
-                "answer": answer,
+                "answer": response["answer"],
                 "datasource": result.datasource,
                 "web_search_used": web_search_used,
-                "sources": [] if web_search_used else ["local_documents"]
+                "sources": response["sources"]
             }
-            
+
         except Exception as e:
             logger.error(f"Error processing question: {e}")
             return {
@@ -329,16 +369,65 @@ class AgenticRetrieval:
 
 # Example usage
 if __name__ == "__main__":
-    # Initialize the system
-    rag = AgenticRetrieval(
-        pdf_folder="./data/",
-        persist_directory="./chroma_db"
-    )
+    print("🤖 Numerical Analysis Knowledge Agent")
+    print("=" * 50)
+    print("Initializing the system...")
     
-    # Test query
-    test_question = "please give me the definition of floating point numbers"
-    result = rag.invoke(test_question)
-    
-    print(f"Question: {test_question}")
-    print(f"Answer: {result['answer']}")
-    print(f"Datasource: {result['datasource']}") 
+    try:
+        # Initialize the system
+        rag = AgenticRetrieval(
+            pdf_folder="./data/",
+            persist_directory="./chroma_db"
+        )
+        print("✅ System initialized successfully!")
+        print("💡 You can ask questions about Numerical Analysis topics.")
+        print("💡 Type 'quit', 'exit', or 'bye' to stop the program.")
+        print("=" * 50)
+        
+        # Interactive chat loop
+        while True:
+            try:
+                # Get user input
+                question = input("\n🧑 Your question: ").strip()
+                
+                # Check for exit commands
+                if question.lower() in ['quit', 'exit', 'bye', 'q']:
+                    print("\n👋 Goodbye! Thanks for using the NA Knowledge Agent!")
+                    break
+                
+                # Skip empty questions
+                if not question:
+                    print("❌ Please enter a question.")
+                    continue
+                
+                # Process the question
+                print("\n🤔 Thinking...")
+                result = rag.invoke(question)
+                
+                # Display the result
+                print(f"\n🤖 Answer:")
+                print(f"{result['answer']}")
+                print(f"\n📊 Source: {result['datasource']}")
+                
+                if result.get('web_search_used', False):
+                    print("🌐 Web search was used for this query.")
+                else:
+                    print("📚 Answer from local documents.")
+                    # Show specific source documents
+                    sources = result.get('sources', [])
+                    if sources:
+                        print(f"📄 Source documents: {', '.join(sources)}")
+                    else:
+                        print("📄 No specific source documents identified.")
+                
+            except KeyboardInterrupt:
+                print("\n\n👋 Goodbye! Thanks for using the NA Knowledge Agent!")
+                break
+            except Exception as e:
+                print(f"\n❌ Error processing your question: {str(e)}")
+                print("Please try again with a different question.")
+                
+    except Exception as e:
+        print(f"❌ Failed to initialize the system: {str(e)}")
+        print("Please check your .env file and make sure all dependencies are installed.")
+        exit(1) 
