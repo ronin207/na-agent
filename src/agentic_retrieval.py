@@ -1,8 +1,10 @@
 import os
 import sys
 import logging
-from typing import Dict, List, Any, Union, Optional, Literal
+import re
+from typing import Dict, List, Any, Union, Optional, Literal, Tuple
 from dotenv import load_dotenv
+import nbformat
 
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -27,12 +29,186 @@ load_dotenv()
 class RouteQuery(BaseModel):
     """Route a user query to the most relevant datasource."""
     
-    datasource: Literal["local_documents", "web_search"] = Field(
+    datasource: Literal["local_documents", "web_search", "exercise_solver"] = Field(
         ...,
         description="""Given a user question choose which datasource would be most relevant for answering their question.
-        If it is related to Numerical Analysis, choose local_documents..
+        If it is related to Numerical Analysis theory/concepts, choose local_documents.
+        If it mentions exercises (e.g., "Exercise 5.1", "solve exercise", "homework"), choose exercise_solver.
         Otherwise, choose web_search.""",
     )
+
+class ExerciseSolver:
+    """Enhanced exercise solver that uses lecture notes to solve exercises."""
+    
+    def __init__(self, llm: ChatOpenAI, retriever, pdf_folder: str):
+        self.llm = llm
+        self.retriever = retriever
+        self.pdf_folder = pdf_folder
+    
+    def extract_exercise_info(self, query: str) -> Tuple[Optional[str], Optional[float]]:
+        """Extract exercise number and section from query."""
+        # Pattern to match Exercise X.Y format
+        exercise_patterns = [
+            r'[Ee]xercise\s*(\d+)\.(\d+)',
+            r'[Ee]x\s*(\d+)\.(\d+)',
+            r'(\d+)\.(\d+)',
+        ]
+        
+        for pattern in exercise_patterns:
+            match = re.search(pattern, query)
+            if match:
+                chapter = int(match.group(1))
+                exercise_num = float(f"{match.group(1)}.{match.group(2)}")
+                return f"Exercise{chapter}.{match.group(2)}", exercise_num
+        
+        return None, None
+    
+    def find_related_lectures(self, exercise_num: Optional[float]) -> List[str]:
+        """Find lecture notes related to the exercise."""
+        if exercise_num is None:
+            return []
+        
+        chapter = int(exercise_num)
+        related_lectures = []
+        
+        # Mapping of exercise chapters to lecture notes
+        lecture_mapping = {
+            1: ["1st.pdf"],
+            2: ["2nd.pdf"], 
+            3: ["3rd.pdf"],
+            4: ["4th.pdf", "LectureNote-4th-Norms.ipynb"],
+            5: ["5th.pdf", "LectureNote-5th-6th-LinearEq.ipynb"],
+            6: ["LectureNote-5th-6th-LinearEq.ipynb"],
+            7: ["LectureNote-7th-8th-NonLinearEq.ipynb"],
+            8: ["LectureNote-7th-8th-NonLinearEq.ipynb"],
+        }
+        
+        return lecture_mapping.get(chapter, [])
+    
+    def load_notebook_with_nbformat(self, notebook_path: str) -> Optional[Document]:
+        """Load notebook using nbformat for better control."""
+        try:
+            with open(notebook_path, 'r', encoding='utf-8') as f:
+                nb = nbformat.read(f, as_version=4)
+            
+            content_parts = []
+            exercise_metadata = {
+                'type': 'exercise',
+                'source': os.path.basename(notebook_path),
+                'has_code': False,
+                'has_math': False
+            }
+            
+            for cell in nb.cells:
+                if cell.cell_type == 'markdown':
+                    source_text = ''.join(cell.source) if isinstance(cell.source, list) else cell.source
+                    content_parts.append(source_text)
+                    
+                    # Check for mathematical content
+                    if '$' in source_text or '$$' in source_text:
+                        exercise_metadata['has_math'] = True
+                        
+                elif cell.cell_type == 'code':
+                    code_content = ''.join(cell.source) if isinstance(cell.source, list) else cell.source
+                    if code_content.strip():
+                        content_parts.append(f"```python\n{code_content}\n```")
+                        exercise_metadata['has_code'] = True
+            
+            if content_parts:
+                full_content = '\n\n'.join(content_parts)
+                return Document(
+                    page_content=full_content,
+                    metadata=exercise_metadata
+                )
+                
+        except Exception as e:
+            logging.warning(f"Failed to load notebook {notebook_path} with nbformat: {e}")
+        
+        return None
+    
+    def solve_exercise(self, query: str) -> Dict[str, Any]:
+        """Solve exercise using related lecture materials."""
+        # Extract exercise information
+        exercise_file, exercise_num = self.extract_exercise_info(query)
+        
+        # Load the specific exercise if found
+        exercise_content = ""
+        if exercise_file:
+            exercise_path = os.path.join(self.pdf_folder, f"{exercise_file}.ipynb")
+            if os.path.exists(exercise_path):
+                exercise_doc = self.load_notebook_with_nbformat(exercise_path)
+                if exercise_doc:
+                    exercise_content = exercise_doc.page_content
+        
+        # Find related lecture materials
+        related_lectures = self.find_related_lectures(exercise_num)
+        
+        # Retrieve relevant context using RAG
+        rag_results = self.retriever.invoke(query)
+        context_docs = [doc.page_content for doc in rag_results]
+        
+        # Enhanced prompt for exercise solving
+        template = """You are an expert numerical analysis tutor helping a student solve exercises using lecture materials.
+
+**Exercise Query:** {query}
+
+**Exercise Content:**
+{exercise_content}
+
+**Related Lecture Context:**
+{context}
+
+**Related Lecture Files:** {related_lectures}
+
+Please provide a comprehensive solution that:
+
+1. **Problem Analysis**: Clearly state what the exercise is asking for
+2. **Theoretical Foundation**: Explain the relevant theory from the lecture notes
+3. **Solution Steps**: Provide step-by-step solution with mathematical reasoning
+4. **Code Implementation**: If applicable, provide Python code with explanations
+5. **Verification**: Show how to verify the solution
+6. **Learning Notes**: Highlight key concepts the student should understand
+
+When including mathematical expressions:
+- Use $...$ for inline math
+- Use $$...$$ for equation blocks
+
+Format your response clearly with appropriate headers and explanations suitable for learning.
+"""
+
+        prompt = ChatPromptTemplate.from_template(template)
+        
+        # Prepare context
+        context_text = "\n\n".join(context_docs[:5])  # Use top 5 context documents
+        related_lectures_text = ", ".join(related_lectures) if related_lectures else "General numerical analysis materials"
+        
+        # Generate solution
+        chain = prompt | self.llm | StrOutputParser()
+        
+        solution = chain.invoke({
+            "query": query,
+            "exercise_content": exercise_content if exercise_content else "Exercise content not found in local files.",
+            "context": context_text,
+            "related_lectures": related_lectures_text
+        })
+        
+        # Extract sources
+        sources = related_lectures.copy()
+        if exercise_file:
+            sources.append(f"{exercise_file}.ipynb")
+        
+        # Add sources from RAG results
+        for doc in rag_results[:3]:  # Top 3 documents
+            source = doc.metadata.get('source', 'Unknown')
+            if source not in sources:
+                sources.append(source)
+        
+        return {
+            "answer": solution,
+            "sources": sources,
+            "exercise_detected": exercise_file is not None,
+            "related_lectures": related_lectures
+        }
 
 class RAGFusion:
     def __init__(self, question: str, llm: ChatOpenAI):
@@ -83,15 +259,15 @@ class RAGFusion:
 
     def final_rag_chain(self, retrieval_chain_rag_fusion):
         """Create the final RAG chain and capture source documents."""
-        template = r"""Answer the following question based on this context:
+        template = """Answer the following question based on this context:
 
         {context}
 
         Question: {question}
 
         When including mathematical expressions:
-        - Use $...$ for inline math (not \(...\))
-        - Use $$...$$ for equation blocks (not \[...\])
+        - Use $...$ for inline math (not \\(...\\))
+        - Use $$...$$ for equation blocks (not \\[...\\])
 
         However, if the question's contents are not in the retriever, please state how the information
         cannot be found in the textbook. Say something like: "The information is not stated in the textbook,
@@ -333,7 +509,6 @@ class AgenticRetrieval:
         
         # Load Jupyter notebooks
         logger.info("Loading Jupyter notebooks...")
-        import json
         import glob
         
         notebook_files = glob.glob(os.path.join(self.pdf_folder, "**/*.ipynb"), recursive=True)
@@ -341,35 +516,45 @@ class AgenticRetrieval:
         for notebook_path in notebook_files:
             try:
                 with open(notebook_path, 'r', encoding='utf-8') as f:
-                    notebook = json.load(f)
+                    nb = nbformat.read(f, as_version=4)
                 
-                # Extract content from notebook cells
+                # Extract content from notebook cells using nbformat
                 content_parts = []
-                for cell in notebook.get('cells', []):
-                    if cell.get('cell_type') == 'markdown':
-                        source = cell.get('source', [])
-                        if isinstance(source, list):
-                            content_parts.append(''.join(source))
-                        else:
-                            content_parts.append(source)
-                    elif cell.get('cell_type') == 'code':
-                        source = cell.get('source', [])
-                        if isinstance(source, list):
-                            code_content = ''.join(source)
-                        else:
-                            code_content = source
+                notebook_metadata = {
+                    'source': os.path.basename(notebook_path),
+                    'type': 'jupyter_notebook',
+                    'has_code': False,
+                    'has_math': False
+                }
+                
+                # Detect exercise vs lecture note
+                notebook_name = os.path.basename(notebook_path).lower()
+                if 'exercise' in notebook_name:
+                    notebook_metadata['type'] = 'exercise'
+                elif 'lecture' in notebook_name:
+                    notebook_metadata['type'] = 'lecture_note'
+                
+                for cell in nb.cells:
+                    if cell.cell_type == 'markdown':
+                        source_text = ''.join(cell.source) if isinstance(cell.source, list) else cell.source
+                        content_parts.append(source_text)
+                        
+                        # Check for mathematical content
+                        if '$' in source_text or '$$' in source_text:
+                            notebook_metadata['has_math'] = True
+                            
+                    elif cell.cell_type == 'code':
+                        code_content = ''.join(cell.source) if isinstance(cell.source, list) else cell.source
                         if code_content.strip():  # Only add non-empty code
                             content_parts.append(f"```python\n{code_content}\n```")
+                            notebook_metadata['has_code'] = True
                 
                 # Create document from notebook content
                 if content_parts:
                     full_content = '\n\n'.join(content_parts)
                     doc = Document(
                         page_content=full_content,
-                        metadata={
-                            'source': os.path.basename(notebook_path),
-                            'type': 'jupyter_notebook'
-                        }
+                        metadata=notebook_metadata
                     )
                     documents.append(doc)
                     
@@ -435,6 +620,10 @@ class AgenticRetrieval:
                 "sources": ["web_search"]
             }
         
+        elif "exercise_solver" in datasource.lower():
+            exercise_solver = ExerciseSolver(self.llm, self.retriever, self.pdf_folder)
+            return exercise_solver.solve_exercise(question)
+        
         else:
             return {
                 "answer": "This information cannot be found in the textbook nor the internet. Please try again!",
@@ -461,12 +650,22 @@ class AgenticRetrieval:
             # Determine if web search was used
             web_search_used = "web_search" in result.datasource.lower()
             
-            return {
+            # Base response structure
+            response_data = {
                 "answer": response["answer"],
                 "datasource": result.datasource,
                 "web_search_used": web_search_used,
                 "sources": response["sources"]
             }
+            
+            # Add exercise-specific metadata if available
+            if "exercise_solver" in result.datasource.lower():
+                response_data.update({
+                    "exercise_detected": response.get("exercise_detected", False),
+                    "related_lectures": response.get("related_lectures", [])
+                })
+            
+            return response_data
 
         except Exception as e:
             logger.error(f"Error processing question: {e}")

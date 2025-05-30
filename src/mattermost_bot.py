@@ -61,14 +61,15 @@ class ThreadManager:
                 'user_name': user_name,
                 'created_at': time.time(),
                 'last_activity': time.time(),
-                'message_count': 0,
+                'message_count': 1,  # Start with 1 since this is the first message
                 'conversation_active': True
             }
             logger.info(f"Created new thread conversation: {thread_id}")
         else:
-            # Update last activity
+            # Update last activity and increment message count
             self.threads[thread_id]['last_activity'] = time.time()
             self.threads[thread_id]['message_count'] += 1
+            logger.info(f"Updated thread {thread_id}, message count: {self.threads[thread_id]['message_count']}")
         
         return self.threads[thread_id]
     
@@ -248,6 +249,8 @@ def extract_thread_info(data: Dict[str, Any]) -> tuple[Optional[str], bool]:
     thread_root_id = None
     is_thread_reply = False
     
+    logger.debug(f"Extracting thread info from webhook data: {json.dumps(data, indent=2)}")
+    
     # Method 1: Check if there's a root_id in the webhook data
     if 'root_id' in data and data['root_id']:
         thread_root_id = data['root_id']
@@ -263,15 +266,18 @@ def extract_thread_info(data: Dict[str, Any]) -> tuple[Optional[str], bool]:
             else:
                 post_data = data['post']
             
+            logger.debug(f"Post data: {json.dumps(post_data, indent=2)}")
+            
             if 'root_id' in post_data and post_data['root_id']:
                 thread_root_id = post_data['root_id']
                 is_thread_reply = True
                 logger.info(f"Thread reply detected via post.root_id: {thread_root_id}")
+                return thread_root_id, is_thread_reply
             elif 'id' in post_data:
                 # This could be the start of a new thread
                 thread_root_id = post_data['id']
                 is_thread_reply = False
-                logger.info(f"Potential new thread detected: {thread_root_id}")
+                logger.info(f"New thread detected: {thread_root_id}")
             
         except (json.JSONDecodeError, KeyError) as e:
             logger.error(f"Error parsing post data for thread info: {e}")
@@ -282,6 +288,7 @@ def extract_thread_info(data: Dict[str, Any]) -> tuple[Optional[str], bool]:
         if post_id:
             post_details = get_post_details(post_id)
             if post_details:
+                logger.debug(f"API post details: {json.dumps(post_details, indent=2)}")
                 if post_details.get('root_id'):
                     thread_root_id = post_details['root_id']
                     is_thread_reply = True
@@ -289,7 +296,15 @@ def extract_thread_info(data: Dict[str, Any]) -> tuple[Optional[str], bool]:
                 else:
                     thread_root_id = post_details.get('id', post_id)
                     is_thread_reply = False
+                    logger.info(f"New thread via API: {thread_root_id}")
     
+    # Method 4: Check parent_id field (some Mattermost configurations use this)
+    if not is_thread_reply and 'parent_id' in data and data['parent_id']:
+        thread_root_id = data['parent_id']
+        is_thread_reply = True
+        logger.info(f"Thread reply detected via parent_id: {thread_root_id}")
+    
+    logger.info(f"Final thread info - ID: {thread_root_id}, is_reply: {is_thread_reply}")
     return thread_root_id, is_thread_reply
 
 def process_query(text, channel_id, user_name, root_id=None, webhook_data=None):
@@ -310,13 +325,29 @@ def process_query(text, channel_id, user_name, root_id=None, webhook_data=None):
         thread_id = None
         
         if effective_root_id:
-            thread_id = effective_root_id
+            # For thread replies, use the root thread ID for conversation context
+            if is_thread_reply and thread_root_id:
+                thread_id = thread_root_id  # Use the original thread root for conversation
+            else:
+                thread_id = effective_root_id  # For new posts, use the current post ID
+                
             # Check if this is part of an ongoing conversation
-            if thread_manager.is_thread_conversation(thread_id) or is_thread_reply:
+            # Use conversational agent if:
+            # 1. This is a thread reply (follow-up question)
+            # 2. OR this thread already has a conversation history
+            if is_thread_reply or thread_manager.is_thread_conversation(thread_id):
                 use_conversational_agent = True
                 # Update thread manager
                 thread_manager.get_or_create_thread(thread_id, channel_id, user_name)
-                logger.info(f"Using conversational agent for thread: {thread_id}")
+                logger.info(f"Using conversational agent for thread: {thread_id} (is_reply: {is_thread_reply})")
+            else:
+                # This might be a new thread - check if it should start a conversation
+                # For now, we'll mark any thread as potentially conversational
+                thread_manager.get_or_create_thread(thread_id, channel_id, user_name)
+                logger.info(f"Started potential conversation thread: {thread_id}")
+        else:
+            # No thread context, this is a standalone question
+            logger.info("Processing standalone question (no thread context)")
         
         # Create a stop event for the typing indicator
         stop_typing = Event()
@@ -379,6 +410,13 @@ def process_query(text, channel_id, user_name, root_id=None, webhook_data=None):
             # Extract the answer from the response
             answer = response_data.get('response', 'I apologize, but I was unable to process your query.')
             
+            # Extract sources and other metadata
+            sources = response_data.get('sources', [])
+            web_search_used = response_data.get('web_search_used', False)
+            datasource = response_data.get('datasource', 'unknown')
+            exercise_detected = response_data.get('exercise_detected', False)
+            related_lectures = response_data.get('related_lectures', [])
+            
             # Add thread context indicator if this is a follow-up
             if use_conversational_agent and is_thread_reply:
                 thread_info = thread_manager.threads.get(thread_id, {})
@@ -386,14 +424,34 @@ def process_query(text, channel_id, user_name, root_id=None, webhook_data=None):
                 if message_count > 1:
                     answer = f"🧵 *Thread follow-up #{message_count}*\n\n{answer}"
             
+            # Add source information to the answer
+            if sources and len(sources) > 0:
+                # Filter out any empty or 'web_search' sources for document references
+                doc_sources = [source for source in sources if source and source != 'web_search']
+                
+                if doc_sources:
+                    answer += f"\n\n📚 **Sources:** {', '.join(doc_sources)}"
+                    
+            # Add exercise-specific information
+            if exercise_detected:
+                answer += f"\n\n🎯 **Exercise Solution**"
+                if related_lectures:
+                    answer += f"\n📖 **Related Lectures:** {', '.join(related_lectures)}"
+                    
+            # Add datasource information
+            if web_search_used:
+                answer += f"\n🌐 *Information retrieved from web search*"
+            elif datasource == "local_documents":
+                answer += f"\n📖 *Information from local documents*"
+            elif datasource == "exercise_solver":
+                answer += f"\n🎓 *Comprehensive exercise solution with lecture materials*"
+            
             # Send the response back to Mattermost
             sent_message = send_message(channel_id, answer, root_id=effective_root_id)
             
-            # If this was the start of a new thread and we successfully sent a message, 
-            # mark it as a thread conversation
-            if sent_message and not is_thread_reply and effective_root_id:
-                thread_manager.get_or_create_thread(effective_root_id, channel_id, user_name)
-                logger.info(f"Started new thread conversation: {effective_root_id}")
+            # Log successful completion
+            if sent_message:
+                logger.info(f"Successfully sent response for thread: {effective_root_id}")
             
             return jsonify({'response_type': 'in_channel'})
             
@@ -460,7 +518,7 @@ def mattermost_webhook():
         user_name = data.get('user_name', 'user')
         
         # Log the full webhook data for debugging
-        logger.debug(f"Full webhook data: {json.dumps(data, indent=2)}")
+        logger.info(f"Full webhook data: {json.dumps(data, indent=2)}")
         
         # Handle mentions (from outgoing webhook)
         if 'text' in data:
@@ -572,8 +630,36 @@ def handle_lecture_command(data):
             response.raise_for_status()
             result = response.json()
             
-            # Format and send the response
-            answer = result.get('answer', 'No answer found')
+            # Extract answer and source information
+            answer = result.get('response', 'No answer found')
+            sources = result.get('sources', [])
+            web_search_used = result.get('web_search_used', False)
+            datasource = result.get('datasource', 'unknown')
+            exercise_detected = result.get('exercise_detected', False)
+            related_lectures = result.get('related_lectures', [])
+            
+            # Add source information to the answer
+            if sources and len(sources) > 0:
+                # Filter out any empty or 'web_search' sources for document references
+                doc_sources = [source for source in sources if source and source != 'web_search']
+                
+                if doc_sources:
+                    answer += f"\n\n📚 **Sources:** {', '.join(doc_sources)}"
+                    
+            # Add exercise-specific information
+            if exercise_detected:
+                answer += f"\n\n🎯 **Exercise Solution**"
+                if related_lectures:
+                    answer += f"\n📖 **Related Lectures:** {', '.join(related_lectures)}"
+                    
+            # Add datasource information
+            if web_search_used:
+                answer += f"\n🌐 *Information retrieved from web search*"
+            elif datasource == "local_documents":
+                answer += f"\n📖 *Information from local documents*"
+            elif datasource == "exercise_solver":
+                answer += f"\n🎓 *Comprehensive exercise solution with lecture materials*"
+            
             send_message(channel_id, answer)
             
         except requests.Timeout:
