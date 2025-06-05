@@ -125,7 +125,7 @@ def send_message(channel_id, message, response_type='in_channel', root_id=None):
             data['root_id'] = current_root_id
         
         logger.info(f"Sending message with data: {json.dumps(data)}") # Log what's being sent
-
+        
         # Send the message
         response = requests.post(
             f'{MATTERMOST_URL}/api/v4/posts',
@@ -429,7 +429,7 @@ def mattermost_webhook():
             logger.info(f"📝 Constructed current_actual_post_data_for_conv from webhook data (fallback) - ID: {current_actual_post_data_for_conv.get('id')}, Root ID: {current_actual_post_data_for_conv.get('root_id')}")
         else:
             logger.warning("Could not identify any post_data from webhook payload for conversational processing.")
-
+        
         # Handle mentions (from outgoing webhook)
         if 'text' in data: # data['text'] is the message content
             message_content_from_webhook = data.get('text', '').strip()

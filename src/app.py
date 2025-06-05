@@ -6,7 +6,6 @@ import os
 import sys
 import logging
 from dotenv import load_dotenv
-import asyncio
 from contextlib import asynccontextmanager
 
 # Add the project root to Python path
@@ -24,11 +23,6 @@ logger = logging.getLogger(__name__)
 class QueryRequest(BaseModel):
     text: str
     video_url: str = None  # Optional video URL parameter
-    user: str = None  # Optional user information
-    channel_id: str = None  # Optional channel information
-    use_conversational_agent: bool = False  # Whether to use conversational agent
-    thread_id: str = None  # Thread ID for conversation context
-    is_thread_reply: bool = False  # Whether this is a reply in a thread
 
 # Load environment variables
 env_path = os.path.join(project_root, '.env')
@@ -58,7 +52,7 @@ async def lifespan(app: FastAPI):
             persist_directory=os.path.join(project_root, "chroma_db"),
             force_rebuild=False
         )
-        
+            
         logger.info("RAG pipeline initialized successfully")
         yield
     except Exception as e:
@@ -104,41 +98,24 @@ async def process_query(query: QueryRequest):
         # Log the incoming request
         logger.info(f"Received query request: {query.model_dump()}")
         
-        # Process the query based on whether conversational agent should be used
+        # Process the query using the basic RAG pipeline
         logger.info(f"Processing query: {query.text}")
+        response = rag_pipeline.invoke(query.text)
         
-        if query.use_conversational_agent and hasattr(rag_pipeline, 'conversational_agent'):
-            # Use conversational agent for threaded conversations
-            logger.info(f"Using conversational agent for thread: {query.thread_id}")
-            response = rag_pipeline.conversational_agent.query(query.text)
-            
-            # Format response for conversational agent
-            result = {
-                "response": response.get('answer', 'No answer found'),
-                "sources": response.get('sources', []),
-                "web_search_used": response.get('web_search_used', False),
-                "datasource": "conversational_agent",
-                "is_followup": response.get('is_followup', False),
-                "thread_id": query.thread_id,
-                "processed_query": response.get('processed_query', query.text)
-            }
-        else:
-            # Use regular RAG pipeline
-            response = rag_pipeline.invoke(query.text)
-            
-            # Format the response to match what mattermost_bot.py expects
-            result = {
-                "response": response.get('answer', 'No answer found'),
-                "sources": response.get('sources', []),
-                "web_search_used": response.get('web_search_used', False),
-                "datasource": response.get('datasource', 'unknown'),
-                "thread_id": query.thread_id
-            }
+        # Format the response to match what mattermost_bot.py expects
+        result = {
+            "response": response.get('response', response.get('answer', 'No answer found')),  # Handle both formats
+            "sources": response.get('sources', []),
+            "web_search_used": response.get('web_search_used', False),
+            "datasource": response.get('datasource', 'unknown'),
+            "exercise_detected": response.get('exercise_detected', False),
+            "related_lectures": response.get('related_lectures', []),
+            "query_analysis": response.get('query_analysis', {})  # Add query analysis for debugging
+        }
         
         # Log the response
-        logger.info(f"Generated response: {result}")
+        logger.info(f"Generated response with {len(result['sources'])} sources")
         
-        logger.info(f"Returning result: {result}")
         return result
         
     except Exception as e:

@@ -5,6 +5,8 @@ import re
 from typing import Dict, List, Any, Union, Optional, Literal, Tuple
 from dotenv import load_dotenv
 import nbformat
+from datetime import datetime, timedelta
+import json
 
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -18,6 +20,12 @@ from langchain.schema import Document
 from pydantic.v1 import BaseModel, Field
 from operator import itemgetter
 from openai import OpenAI
+
+# Import conversation-related modules from Langchain
+from langchain.memory import ConversationBufferWindowMemory, ConversationSummaryBufferMemory
+from langchain.chains import ConversationChain
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain.schema import BaseMemory
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -59,6 +67,104 @@ class RouteQuery(BaseModel):
         If it mentions exercises (e.g., "Exercise 5.1", "solve exercise", "homework"), choose exercise_solver.
         Otherwise, choose web_search.""",
     )
+
+class ConversationSession:
+    """Manages individual conversation sessions with memory."""
+    
+    def __init__(self, session_id: str, llm: ChatOpenAI, max_token_limit: int = 2000):
+        self.session_id = session_id
+        self.created_at = datetime.now()
+        self.last_accessed = datetime.now()
+        
+        # Use ConversationSummaryBufferMemory for better token management
+        self.memory = ConversationSummaryBufferMemory(
+            llm=llm,
+            max_token_limit=max_token_limit,
+            memory_key="chat_history",
+            return_messages=True
+        )
+        
+        # Track conversation context
+        self.conversation_context = {
+            "topic_area": None,
+            "current_exercise": None,
+            "preferred_datasource": None,
+            "user_preferences": {}
+        }
+    
+    def add_exchange(self, human_message: str, ai_message: str):
+        """Add a human-AI exchange to memory."""
+        self.memory.chat_memory.add_user_message(human_message)
+        self.memory.chat_memory.add_ai_message(ai_message)
+        self.last_accessed = datetime.now()
+    
+    def get_conversation_history(self) -> str:
+        """Get formatted conversation history."""
+        return self.memory.buffer
+    
+    def update_context(self, analysis: QueryAnalysis, datasource: str):
+        """Update conversation context based on current query."""
+        if analysis.topic_area:
+            self.conversation_context["topic_area"] = analysis.topic_area
+        
+        # Track exercise progression
+        for keyword in analysis.keywords:
+            if "exercise" in keyword.lower():
+                self.conversation_context["current_exercise"] = keyword
+        
+        self.conversation_context["preferred_datasource"] = datasource
+        self.last_accessed = datetime.now()
+    
+    def is_expired(self, timeout_hours: int = 24) -> bool:
+        """Check if session has expired."""
+        return datetime.now() - self.last_accessed > timedelta(hours=timeout_hours)
+
+class ConversationManager:
+    """Manages multiple conversation sessions."""
+    
+    def __init__(self, llm: ChatOpenAI):
+        self.llm = llm
+        self.sessions: Dict[str, ConversationSession] = {}
+        self.session_timeout_hours = 24
+    
+    def get_or_create_session(self, session_id: str) -> ConversationSession:
+        """Get existing session or create new one."""
+        self.cleanup_expired_sessions()
+        
+        if session_id not in self.sessions:
+            logger.info(f"Creating new conversation session: {session_id}")
+            self.sessions[session_id] = ConversationSession(session_id, self.llm)
+        else:
+            logger.info(f"Using existing conversation session: {session_id}")
+            self.sessions[session_id].last_accessed = datetime.now()
+        
+        return self.sessions[session_id]
+    
+    def cleanup_expired_sessions(self):
+        """Remove expired sessions to free memory."""
+        expired_sessions = [
+            sid for sid, session in self.sessions.items() 
+            if session.is_expired(self.session_timeout_hours)
+        ]
+        
+        for sid in expired_sessions:
+            logger.info(f"Removing expired session: {sid}")
+            del self.sessions[sid]
+    
+    def get_session_info(self) -> Dict[str, Any]:
+        """Get information about active sessions."""
+        return {
+            "active_sessions": len(self.sessions),
+            "sessions": {
+                sid: {
+                    "created_at": session.created_at.isoformat(),
+                    "last_accessed": session.last_accessed.isoformat(),
+                    "topic_area": session.conversation_context.get("topic_area"),
+                    "current_exercise": session.conversation_context.get("current_exercise")
+                }
+                for sid, session in self.sessions.items()
+            }
+        }
 
 class ExerciseSolver:
     """Enhanced exercise solver that uses lecture notes to solve exercises."""
@@ -149,8 +255,8 @@ class ExerciseSolver:
         
         return None
     
-    def solve_exercise(self, query: str) -> Dict[str, Any]:
-        """Solve exercise using related lecture materials."""
+    def solve_exercise(self, query: str, conversation_history: str = "") -> Dict[str, Any]:
+        """Solve exercise using related lecture materials with conversation context."""
         # Extract exercise information
         exercise_file, exercise_num = self.extract_exercise_info(query)
         
@@ -170,10 +276,13 @@ class ExerciseSolver:
         rag_results = self.retriever.invoke(query)
         context_docs = [doc.page_content for doc in rag_results]
         
-        # Enhanced prompt for exercise solving
+        # Enhanced prompt for exercise solving with conversation awareness
         template = """You are an expert numerical analysis tutor helping a student solve exercises using lecture materials.
 
-**Exercise Query:** {query}
+**Previous Conversation:**
+{conversation_history}
+
+**Current Exercise Query:** {query}
 
 **Exercise Content:**
 {exercise_content}
@@ -183,14 +292,15 @@ class ExerciseSolver:
 
 **Related Lecture Files:** {related_lectures}
 
-Please provide a comprehensive solution that:
+Based on our previous conversation and the current query, please provide a comprehensive solution that:
 
 1. **Problem Analysis**: Clearly state what the exercise is asking for
-2. **Theoretical Foundation**: Explain the relevant theory from the lecture notes
-3. **Solution Steps**: Provide step-by-step solution with mathematical reasoning
-4. **Code Implementation**: If applicable, provide Python code with explanations
-5. **Verification**: Show how to verify the solution
-6. **Learning Notes**: Highlight key concepts the student should understand
+2. **Connection to Previous Discussion**: If relevant, reference our previous conversation
+3. **Theoretical Foundation**: Explain the relevant theory from the lecture notes
+4. **Solution Steps**: Provide step-by-step solution with mathematical reasoning
+5. **Code Implementation**: If applicable, provide Python code with explanations
+6. **Verification**: Show how to verify the solution
+7. **Learning Notes**: Highlight key concepts the student should understand
 
 When including mathematical expressions:
 - Use $...$ for inline math
@@ -210,6 +320,7 @@ Format your response clearly with appropriate headers and explanations suitable 
         
         solution = chain.invoke({
             "query": query,
+            "conversation_history": conversation_history if conversation_history else "No previous conversation.",
             "exercise_content": exercise_content if exercise_content else "Exercise content not found in local files.",
             "context": context_text,
             "related_lectures": related_lectures_text
@@ -236,30 +347,39 @@ Format your response clearly with appropriate headers and explanations suitable 
             "related_lectures": related_lectures
         }
 
-class EnhancedRAGFusion:
-    def __init__(self, question: str, llm: ChatOpenAI, query_analyzer):
+class ConversationalEnhancedRAGFusion:
+    """Enhanced RAG Fusion with conversation awareness."""
+    
+    def __init__(self, question: str, llm: ChatOpenAI, query_analyzer, conversation_history: str = ""):
         self.question = question
         self.llm = llm
         self.query_analyzer = query_analyzer
+        self.conversation_history = conversation_history
 
     def analyze_query(self) -> QueryAnalysis:
         """Analyze the query to understand user intent."""
         return self.query_analyzer.invoke({"question": self.question})
 
     def generate_enhanced_queries(self, analysis: QueryAnalysis):
-        """Generate queries based on analysis, preserving important keywords."""
+        """Generate queries based on analysis and conversation context."""
         
         keywords_text = ", ".join(analysis.keywords) if analysis.keywords else "none"
         document_hints_text = ", ".join(analysis.document_hints) if analysis.document_hints else "none"
+        
+        # Include conversation context in query generation
+        context_prompt = ""
+        if self.conversation_history:
+            context_prompt = f"\n\nPrevious conversation context:\n{self.conversation_history[-500:]}"  # Last 500 chars
         
         if analysis.search_intent == "exact_match":
             template = """The user is looking for EXACT information. Generate 3 search queries that preserve the specific terms and keywords.
             
             Original query: {question}
             Keywords to preserve: {keywords}
-            Document hints: {document_hints}
+            Document hints: {document_hints}{context_prompt}
             
             IMPORTANT: Always include the exact keywords in each query variation.
+            Consider the conversation context when generating queries.
             
             Generate 3 queries that:
             1. Keep exact technical terms unchanged
@@ -273,7 +393,7 @@ class EnhancedRAGFusion:
             
             Original query: {question}
             Topic area: {topic_area}
-            Document hints: {document_hints}
+            Document hints: {document_hints}{context_prompt}
             
             Generate 4 queries that explore:
             1. The main concept
@@ -289,7 +409,7 @@ class EnhancedRAGFusion:
             Original query: {question}
             Keywords to preserve: {keywords}
             Topic area: {topic_area}
-            Document hints: {document_hints}
+            Document hints: {document_hints}{context_prompt}
             
             Generate 4 queries:
             1. Exact keyword match query
@@ -298,6 +418,7 @@ class EnhancedRAGFusion:
             4. Related context query
             
             Always preserve exact keywords in appropriate queries.
+            Consider the conversation context when relevant.
             
             Output (4 queries):"""
         
@@ -314,7 +435,8 @@ class EnhancedRAGFusion:
             "question": self.question,
             "keywords": keywords_text,
             "document_hints": document_hints_text,
-            "topic_area": analysis.topic_area or "numerical analysis"
+            "topic_area": analysis.topic_area or "numerical analysis",
+            "context_prompt": context_prompt
         })
 
     def filter_by_document_hints(self, docs: List[Document], analysis: QueryAnalysis) -> List[Document]:
@@ -409,7 +531,7 @@ class EnhancedRAGFusion:
             return [(doc, 1.0) for doc in docs]
 
     def final_rag_chain(self, retriever):
-        """Create the final enhanced RAG chain."""
+        """Create the final enhanced RAG chain with conversation awareness."""
         # Analyze query
         analysis = self.analyze_query()
         
@@ -420,9 +542,12 @@ class EnhancedRAGFusion:
         context_docs = [doc for doc, score in ranked_docs[:6]]  # Use top 6 docs
         context_text = "\n\n".join([doc.page_content for doc in context_docs])
         
-        # Enhanced template based on search intent
+        # Enhanced template based on search intent with conversation awareness
         if analysis.search_intent == "exact_match":
-            template = """Answer the question with focus on the EXACT terms and specific information requested.
+            template = """You are a helpful numerical analysis assistant. Answer the question with focus on the EXACT terms and specific information requested.
+
+            Previous conversation:
+            {conversation_history}
 
             Context:
             {context}
@@ -430,7 +555,7 @@ class EnhancedRAGFusion:
             Question: {question}
             Keywords to address: {keywords}
 
-            Provide specific, precise information. If exact terms like function names or specific concepts are mentioned, include them directly in your response.
+            Based on our previous conversation (if any) and the current context, provide specific, precise information. If exact terms like function names or specific concepts are mentioned, include them directly in your response.
 
             When including mathematical expressions:
             - Use $...$ for inline math
@@ -439,8 +564,12 @@ class EnhancedRAGFusion:
             If the specific information is not found, clearly state what is missing."""
             
         else:
-            template = """Answer the following question based on this context:
+            template = """You are a helpful numerical analysis assistant. Answer the following question based on the context and our previous conversation.
 
+            Previous conversation:
+            {conversation_history}
+
+            Context:
             {context}
 
             Question: {question}
@@ -449,6 +578,7 @@ class EnhancedRAGFusion:
             - Use $...$ for inline math
             - Use $$...$$ for equation blocks
 
+            If this is a follow-up question, reference relevant parts of our previous conversation.
             However, if the question's contents are not in the retriever, please state how the information
             cannot be found in the textbook. Say something like: "The information is not stated in the textbook,
             so you would not be deeply required to understand it as of now."
@@ -461,12 +591,14 @@ class EnhancedRAGFusion:
             answer = prompt.invoke({
                 "context": context_text, 
                 "question": self.question,
-                "keywords": ", ".join(analysis.keywords)
+                "keywords": ", ".join(analysis.keywords),
+                "conversation_history": self.conversation_history if self.conversation_history else "No previous conversation."
             })
         else:
             answer = prompt.invoke({
                 "context": context_text, 
-                "question": self.question
+                "question": self.question,
+                "conversation_history": self.conversation_history if self.conversation_history else "No previous conversation."
             })
         
         final_chain = self.llm | StrOutputParser()
@@ -493,123 +625,24 @@ class EnhancedRAGFusion:
             "analysis": analysis
         }
 
-# Keeping the original RAGFusion for backward compatibility
-class RAGFusion:
-    def __init__(self, question: str, llm: ChatOpenAI):
-        self.question = question
-        self.llm = llm
-
-    def generate_queries(self):
-        """Generate multiple queries related to the question."""
-        template = """You are a helpful assistant that generates multiple search queries based on a single input query.
-        The context overall should not be changed, and you should stick with the topic of the input query.
-        Generate multiple search queries related to: {question}
-        Output (4 queries):"""
-        
-        prompt_rag_fusion = ChatPromptTemplate.from_template(template)
-        
-        generate_queries = (
-            prompt_rag_fusion
-            | self.llm
-            | StrOutputParser()
-            | (lambda x: x.strip().split("\n"))  # Ensure output is a clean list of queries
-        )
-        return generate_queries
-
-    def reciprocal_rank_fusion(self, results: List[List], k: int = 60):
-        """Perform reciprocal rank fusion on multiple result sets."""
-        fused_scores = {}
-        for docs in results:
-            for rank, doc in enumerate(docs):
-                doc_str = dumps(doc)
-                if doc_str not in fused_scores:
-                    fused_scores[doc_str] = 0
-                fused_scores[doc_str] += 1 / (rank + k)
-
-        reranked_results = [
-            (loads(doc), score)
-            for doc, score in sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
-        ]
-        return reranked_results
-
-    def retrieval_chain_rag_fusion(self, retriever, generate_queries, reciprocal_rank_fusion):
-        """Create retrieval chain for RAG-Fusion."""
-        retrieval_chain_rag_fusion = (
-            generate_queries
-            | (lambda queries: [retriever.invoke(q) if isinstance(q, str) else retriever.invoke(" ".join(q)) for q in queries])
-            | reciprocal_rank_fusion
-        )
-        return retrieval_chain_rag_fusion
-
-    def final_rag_chain(self, retrieval_chain_rag_fusion):
-        """Create the final RAG chain and capture source documents."""
-        template = r"""Answer the following question based on this context:
-
-        {context}
-
-        Question: {question}
-
-        When including mathematical expressions:
-        - Use $...$ for inline math (not \\(...\\))
-        - Use $$...$$ for equation blocks (not \\[...\\])
-
-        However, if the question's contents are not in the retriever, please state how the information
-        cannot be found in the textbook. Say something like: "The information is not stated in the textbook,
-        so you would not be deeply required to understand it as of now."
-        """
-
-        prompt = ChatPromptTemplate.from_template(template)
-
-        # Get the ranked documents from retrieval chain
-        ranked_docs = retrieval_chain_rag_fusion.invoke({"question": self.question})
-        
-        # Extract just the documents for context
-        context_docs = [doc for doc, score in ranked_docs[:5]]  # Use top 5 docs
-        context_text = "\n\n".join([doc.page_content for doc in context_docs])
-        
-        # Generate the answer
-        final_rag_chain = (
-            {"context": lambda x: context_text, "question": itemgetter("question")}
-            | prompt
-            | self.llm
-            | StrOutputParser()
-        )
-
-        rag_fusion_answer = final_rag_chain.invoke({"question": self.question})
-        
-        # Extract source information
-        sources = []
-        for doc in context_docs:
-            source_info = doc.metadata.get('source', 'Unknown source')
-            # Extract just the filename from the full path
-            if '/' in source_info:
-                source_info = source_info.split('/')[-1]
-            sources.append(source_info)
-        
-        # Remove duplicates while preserving order
-        unique_sources = []
-        for source in sources:
-            if source not in unique_sources:
-                unique_sources.append(source)
-        
-        return {
-            "answer": rag_fusion_answer,
-            "sources": unique_sources
-        }
-
 class WebSearch:
     def __init__(self, client: OpenAI):
         self.client = client
 
-    def web_search(self, query: str):
-        """Perform web search using OpenAI's search capabilities."""
+    def web_search(self, query: str, conversation_history: str = ""):
+        """Perform web search using OpenAI's search capabilities with conversation context."""
         try:
+            # Include conversation context in web search if relevant
+            enhanced_query = query
+            if conversation_history:
+                enhanced_query = f"Previous context: {conversation_history[-200:]}\n\nCurrent question: {query}"
+            
             completion = self.client.chat.completions.create(
                 model="gpt-4o-mini-search-preview",
                 messages=[
                     {
                         "role": "user",
-                        "content": query
+                        "content": enhanced_query
                     }
                 ]
             )
@@ -622,9 +655,9 @@ class WebSearch:
             logger.error(f"Web search failed: {e}")
             return "Sorry, I couldn't perform a web search at this time. Please try again later."
 
-class AgenticRetrieval:
+class ConversationalAgenticRetrieval:
     """
-    Enhanced Agentic Retrieval system with improved query understanding and precision.
+    Enhanced Conversational Agentic Retrieval system with conversation memory and session management.
     """
     
     def __init__(
@@ -669,6 +702,9 @@ class AgenticRetrieval:
         # Initialize OpenAI client for web search
         self.openai_client = OpenAI(api_key=openai_api_key)
         self.web_search = WebSearch(self.openai_client)
+        
+        # Initialize conversation manager
+        self.conversation_manager = ConversationManager(self.llm)
         
         # Initialize retriever
         self.retriever = None
@@ -733,17 +769,17 @@ class AgenticRetrieval:
                 self._build_vectorstore()
             else:
                 logger.info("Loading existing vector store from " + self.persist_directory)
-            try:
-                self.vectorstore = Chroma(
-                    persist_directory=self.persist_directory,
-                    embedding_function=self.embeddings
-                )
-                self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.k})
-                logger.info("Vector store loaded successfully")
-            except Exception as e:
+                try:
+                    self.vectorstore = Chroma(
+                        persist_directory=self.persist_directory,
+                        embedding_function=self.embeddings
+                    )
+                    self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": self.k})
+                    logger.info("Vector store loaded successfully")
+                except Exception as e:
                     logger.warning(f"Failed to load existing vector store: {e}")
                     logger.info("Rebuilding vector store...")
-        self._build_vectorstore()
+                    self._build_vectorstore()
     
     def _check_if_data_changed(self):
         """Check if the data folder has been modified since the last vector store build."""
@@ -763,10 +799,10 @@ class AgenticRetrieval:
             for file in files:
                 if file.endswith(('.pdf', '.ipynb')):
                     file_path = os.path.join(root, file)
-                if os.path.getmtime(file_path) > last_build_time:
-                    return True
+                    if os.path.getmtime(file_path) > last_build_time:
+                        return True
                     
-            return False
+        return False
     
     def _save_build_timestamp(self):
         """Save the current timestamp to track when the vector store was built."""
@@ -879,9 +915,10 @@ class AgenticRetrieval:
         # Save build timestamp
         self._save_build_timestamp()
     
-    def choose_route(self, question: str, result: RouteQuery) -> Dict[str, Any]:
-        """Choose the appropriate route based on the routing decision with enhanced processing."""
+    def choose_route(self, question: str, result: RouteQuery, session: ConversationSession) -> Dict[str, Any]:
+        """Choose the appropriate route based on the routing decision with conversation awareness."""
         datasource = result.datasource
+        conversation_history = session.get_conversation_history()
         
         if "local_documents" in datasource.lower():
             if self.retriever is None:
@@ -890,9 +927,11 @@ class AgenticRetrieval:
                     "sources": []
                 }
             
-            # Use enhanced RAG fusion for better query understanding
-            enhanced_ragfusion = EnhancedRAGFusion(question, self.llm, self.query_analyzer)
-            result = enhanced_ragfusion.final_rag_chain(self.retriever)
+            # Use conversational enhanced RAG fusion
+            conversational_ragfusion = ConversationalEnhancedRAGFusion(
+                question, self.llm, self.query_analyzer, conversation_history
+            )
+            result = conversational_ragfusion.final_rag_chain(self.retriever)
             
             return {
                 "answer": result["answer"],
@@ -902,13 +941,13 @@ class AgenticRetrieval:
         
         elif "web_search" in datasource.lower():
             return {
-                "answer": self.web_search.web_search(question),
+                "answer": self.web_search.web_search(question, conversation_history),
                 "sources": ["web_search"]
             }
         
         elif "exercise_solver" in datasource.lower():
             exercise_solver = ExerciseSolver(self.llm, self.retriever, self.pdf_folder)
-            return exercise_solver.solve_exercise(question)
+            return exercise_solver.solve_exercise(question, conversation_history)
         
         else:
             return {
@@ -916,22 +955,33 @@ class AgenticRetrieval:
                 "sources": []
             }
     
-    def invoke(self, question: str) -> Dict[str, Any]:
+    def invoke(self, question: str, session_id: str = "default") -> Dict[str, Any]:
         """
-        Process a question and return the answer with enhanced query understanding.
+        Process a question with conversation awareness.
         
         Args:
             question: The user's question
+            session_id: Unique identifier for the conversation session (e.g., Mattermost thread ID)
             
         Returns:
             Dictionary containing the answer and metadata
         """
         try:
+            # Get or create conversation session
+            session = self.conversation_manager.get_or_create_session(session_id)
+            
             # Route the query
             result = self.router.invoke({"question": question})
             
+            # Update session context with query analysis
+            analysis = self.query_analyzer.invoke({"question": question})
+            session.update_context(analysis, result.datasource)
+            
             # Get the answer and sources
-            response = self.choose_route(question, result)
+            response = self.choose_route(question, result, session)
+            
+            # Add this exchange to conversation memory
+            session.add_exchange(question, response["answer"])
             
             # Determine if web search was used
             web_search_used = "web_search" in result.datasource.lower()
@@ -941,7 +991,9 @@ class AgenticRetrieval:
                 "response": response["answer"],  # Use 'response' for compatibility with existing API
                 "datasource": result.datasource,
                 "web_search_used": web_search_used,
-                "sources": response["sources"]
+                "sources": response["sources"],
+                "session_id": session_id,
+                "conversation_turns": len(session.memory.chat_memory.messages) // 2  # Rough estimate of turns
             }
             
             # Add query analysis for debugging (if available)
@@ -968,54 +1020,87 @@ class AgenticRetrieval:
                 "response": f"Sorry, I encountered an error: {str(e)}",
                 "datasource": "error",
                 "web_search_used": False,
-                "sources": []
+                "sources": [],
+                "session_id": session_id
             }
     
-    async def ainvoke(self, question: str) -> Dict[str, Any]:
+    async def ainvoke(self, question: str, session_id: str = "default") -> Dict[str, Any]:
         """Async version of invoke."""
-        return self.invoke(question)
+        return self.invoke(question, session_id)
+    
+    def get_session_info(self) -> Dict[str, Any]:
+        """Get information about active conversation sessions."""
+        return self.conversation_manager.get_session_info()
+    
+    def clear_session(self, session_id: str) -> bool:
+        """Clear a specific conversation session."""
+        if session_id in self.conversation_manager.sessions:
+            del self.conversation_manager.sessions[session_id]
+            logger.info(f"Cleared session: {session_id}")
+            return True
+        return False
+    
+    def clear_all_sessions(self):
+        """Clear all conversation sessions."""
+        self.conversation_manager.sessions.clear()
+        logger.info("Cleared all conversation sessions")
 
 # Example usage
 if __name__ == "__main__":
-    print("🤖 Numerical Analysis Knowledge Agent")
-    print("=" * 50)
+    print("🤖 Conversational Numerical Analysis Knowledge Agent")
+    print("=" * 60)
     print("Initializing the system...")
     
     try:
         # Initialize the system
-        rag = AgenticRetrieval(
+        rag = ConversationalAgenticRetrieval(
             pdf_folder="./data/",
             persist_directory="./chroma_db"
         )
         print("✅ System initialized successfully!")
         print("💡 You can ask questions about Numerical Analysis topics.")
+        print("💡 The system will remember our conversation context.")
         print("💡 Type 'quit', 'exit', or 'bye' to stop the program.")
-        print("=" * 50)
+        print("💡 Type 'new session' to start a fresh conversation.")
+        print("💡 Type 'session info' to see conversation statistics.")
+        print("=" * 60)
+        
+        current_session_id = "interactive_session"
         
         # Interactive chat loop
         while True:
             try:
                 # Get user input
-                question = input("\n🧑 Your question: ").strip()
+                question = input(f"\n🧑 Your question [Session: {current_session_id}]: ").strip()
                 
-                # Check for exit commands
+                # Check for special commands
                 if question.lower() in ['quit', 'exit', 'bye', 'q']:
-                    print("\n👋 Goodbye! Thanks for using the NA Knowledge Agent!")
+                    print("\n👋 Goodbye! Thanks for using the Conversational NA Knowledge Agent!")
                     break
+                elif question.lower() == 'new session':
+                    current_session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    print(f"🔄 Started new conversation session: {current_session_id}")
+                    continue
+                elif question.lower() == 'session info':
+                    session_info = rag.get_session_info()
+                    print(f"📊 Active sessions: {session_info['active_sessions']}")
+                    for sid, info in session_info['sessions'].items():
+                        print(f"  - {sid}: {info['topic_area'] or 'General'} (Last: {info['last_accessed'][:16]})")
+                    continue
                 
                 # Skip empty questions
                 if not question:
                     print("❌ Please enter a question.")
                     continue
                 
-                # Process the question
+                # Process the question with conversation awareness
                 print("\n🤔 Thinking...")
-                result = rag.invoke(question)
+                result = rag.invoke(question, current_session_id)
                 
                 # Display the result
                 print(f"\n🤖 Answer:")
                 print(f"{result['response']}")
-                print(f"\n📊 Source: {result['datasource']}")
+                print(f"\n📊 Source: {result['datasource']} | Session: {result['session_id']} | Turns: {result['conversation_turns']}")
                 
                 if result.get('web_search_used', False):
                     print("🌐 Web search was used for this query.")
@@ -1029,7 +1114,7 @@ if __name__ == "__main__":
                         print("📄 No specific source documents identified.")
                 
             except KeyboardInterrupt:
-                print("\n\n👋 Goodbye! Thanks for using the NA Knowledge Agent!")
+                print("\n\n👋 Goodbye! Thanks for using the Conversational NA Knowledge Agent!")
                 break
             except Exception as e:
                 print(f"\n❌ Error processing your question: {str(e)}")
