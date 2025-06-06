@@ -38,4 +38,4 @@ flask>=2.0.1
 werkzeug>=2.0.1
 
 # Additional dependencies
-youtube-transcript-api>=0.6.1
+youtube-transcript-api>=0.6.1pypdfium2==4.30.1

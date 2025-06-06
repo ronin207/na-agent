@@ -5,6 +5,7 @@ import re
 from typing import Dict, List, Any, Union, Optional, Literal, Tuple
 from dotenv import load_dotenv
 import nbformat
+import pypdfium2 as pdfium
 
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -786,19 +787,27 @@ class AgenticRetrieval:
         
         # Load PDF documents
         logger.info("Loading PDF documents...")
-        pdf_loader = DirectoryLoader(
-            self.pdf_folder,
-            glob="**/*.pdf",
-            loader_cls=PyPDFLoader,
-            use_multithreading=True
-        )
-        pdf_documents = pdf_loader.load()
-        documents.extend(pdf_documents)
-        logger.info(f"Loaded {len(pdf_documents)} PDF documents")
-        
+        import glob
+        pdf_files = glob.glob(os.path.join(self.pdf_folder, "**/*.pdf"), recursive=True)
+
+        for pdf_path in pdf_files:
+            try:
+                password = None
+                if "PartI-midtermExam2024.pdf" in os.path.basename(pdf_path):
+                    password = os.getenv("part1_midterm")
+
+                with pdfium.PdfDocument(pdf_path, password=password) as doc:
+                    for i, page in enumerate(doc):
+                        text_page = page.get_textpage()
+                        text = text_page.get_text_range()
+                        documents.append(Document(page_content=text, metadata={"source": os.path.basename(pdf_path), "page": i}))
+            except Exception as e:
+                logger.error(f"Failed to load PDF {pdf_path}: {e}")
+
+        logger.info(f"Loaded {len(documents)} pages from PDF documents.")
+
         # Load Jupyter notebooks
         logger.info("Loading Jupyter notebooks...")
-        import glob
         
         notebook_files = glob.glob(os.path.join(self.pdf_folder, "**/*.ipynb"), recursive=True)
         

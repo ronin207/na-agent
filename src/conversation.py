@@ -822,19 +822,29 @@ class ConversationalAgenticRetrieval:
         
         # Load PDF documents
         logger.info("Loading PDF documents...")
-        pdf_loader = DirectoryLoader(
-            self.pdf_folder,
-            glob="**/*.pdf",
-            loader_cls=PyPDFLoader,
-            use_multithreading=True
-        )
-        pdf_documents = pdf_loader.load()
-        documents.extend(pdf_documents)
-        logger.info(f"Loaded {len(pdf_documents)} PDF documents")
+        import glob
+        pdf_files = glob.glob(os.path.join(self.pdf_folder, "**/*.pdf"), recursive=True)
+
+        for pdf_path in pdf_files:
+            try:
+                password = None
+                if "PartI-midtermExam2024.pdf" in os.path.basename(pdf_path):
+                    password = os.getenv("part1_midterm")
+
+                loader = PyPDFLoader(pdf_path, password=password)
+                documents.extend(loader.load())
+            except Exception as e:
+                if "File has not been decrypted" in str(e):
+                    logger.warning(f"Could not load encrypted PDF {pdf_path}. Make sure to set the password in your .env file.")
+                elif "Incorrect password" in str(e):
+                     logger.error(f"Incorrect password for PDF {pdf_path}.")
+                else:
+                    logger.error(f"Failed to load PDF {pdf_path}: {e}")
+
+        logger.info(f"Loaded {len(documents)} pages from PDF documents.")
         
         # Load Jupyter notebooks
         logger.info("Loading Jupyter notebooks...")
-        import glob
         
         notebook_files = glob.glob(os.path.join(self.pdf_folder, "**/*.ipynb"), recursive=True)
         
