@@ -144,22 +144,26 @@ def send_message(channel_id, message, response_type='in_channel', root_id=None):
             logger.error(f"Response text: {e.response.text}")
         return None
 
-def show_typing(channel_id):
-    """Show typing indicator in channel"""
+def show_typing(channel_id: str, root_id: Optional[str] = None):
+    """Show typing indicator in channel, optionally in a thread."""
     try:
         headers = {
             'Authorization': f'Bearer {BOT_TOKEN}',
             'Content-Type': 'application/json'
         }
         
+        payload = {'channel_id': channel_id}
+        if root_id:
+            payload['parent_id'] = root_id
+
         response = requests.post(
             f'{MATTERMOST_URL}/api/v4/users/me/typing',
             headers=headers,
-            json={'channel_id': channel_id}
+            json=payload
         )
         
         response.raise_for_status()
-        logger.debug(f"Successfully showed typing indicator in channel {channel_id}")
+        logger.debug(f"Successfully showed typing indicator in channel {channel_id} (root_id: {root_id})")
         
     except requests.exceptions.RequestException as e:
         logger.error(f"Error showing typing indicator: {str(e)}")
@@ -167,10 +171,10 @@ def show_typing(channel_id):
             logger.error(f"Response status code: {e.response.status_code}")
             logger.error(f"Response text: {e.response.text}")
 
-def show_typing_continuous(channel_id, stop_event):
+def show_typing_continuous(channel_id: str, stop_event: Event, root_id: Optional[str] = None):
     """Continuously show typing indicator until stop_event is set"""
     while not stop_event.is_set():
-        show_typing(channel_id)
+        show_typing(channel_id, root_id=root_id)
         time.sleep(2)  # Show typing every 2 seconds
 
 def extract_youtube_url(text: str) -> Optional[str]:
@@ -232,7 +236,7 @@ def process_query(text, channel_id, user_name, root_id=None, post_data=None):
         # Start typing indicator in a separate thread
         typing_thread = threading.Thread(
             target=show_typing_continuous,
-            args=(channel_id, stop_typing)
+            args=(channel_id, stop_typing, root_id)
         )
         typing_thread.start()
 
