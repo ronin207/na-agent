@@ -11,6 +11,7 @@ openai>=1.10.0,<2.0.0
 # Vector stores
 faiss-cpu>=1.8.0
 chromadb>=1.0.0
+cryptography>=3.1
 
 # Document processing
 llama-cloud-services>=0.0.1
