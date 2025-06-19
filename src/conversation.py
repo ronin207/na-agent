@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import nbformat
 from datetime import datetime, timedelta
 import json
+import pypdfium2 as pdfium
 
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -14,7 +15,7 @@ from langchain.load import dumps, loads
 from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
+from langchain_community.document_loaders import DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from pydantic.v1 import BaseModel, Field
@@ -190,6 +191,24 @@ class ExerciseSolver:
                 exercise_num = float(f"{match.group(1)}.{match.group(2)}")
                 return f"Exercise{chapter}.{match.group(2)}", exercise_num
         
+        # Check for midterm questions
+        midterm_patterns = [
+            r'[Qq]\s*(\d+)-(\d+).*midterm',
+            r'[Qq]uestion\s*(\d+)-(\d+).*midterm',
+            r'midterm.*[Qq]\s*(\d+)-(\d+)',
+            r'midterm.*[Qq]uestion\s*(\d+)-(\d+)',
+            r'[Qq]\s*(\d+).*midterm',
+            r'[Qq]uestion\s*(\d+).*midterm',
+        ]
+        
+        for pattern in midterm_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
+            if match:
+                if len(match.groups()) >= 2:  # Q1-2 format
+                    return f"midterm_Q{match.group(1)}-{match.group(2)}", float(f"{match.group(1)}.{match.group(2)}")
+                else:  # Q1 format
+                    return f"midterm_Q{match.group(1)}", float(match.group(1))
+        
         return None, None
     
     def find_related_lectures(self, exercise_num: Optional[float]) -> List[str]:
@@ -277,36 +296,42 @@ class ExerciseSolver:
         context_docs = [doc.page_content for doc in rag_results]
         
         # Enhanced prompt for exercise solving with conversation awareness
-        template = """You are an expert numerical analysis tutor helping a student solve exercises using lecture materials.
+        template = """You are an expert numerical analysis tutor helping a student solve problems using lecture materials and your knowledge.
 
 **Previous Conversation:**
 {conversation_history}
 
-**Current Exercise Query:** {query}
+**Current Query:** {query}
 
-**Exercise Content:**
+**Problem Content Found:**
 {exercise_content}
 
-**Related Lecture Context:**
+**Related Context from Course Materials:**
 {context}
 
-**Related Lecture Files:** {related_lectures}
+**Related Files:** {related_lectures}
 
-Based on our previous conversation and the current query, please provide a comprehensive solution that:
+INSTRUCTIONS:
+1. If you found the actual problem/question in the content above, SOLVE IT using your numerical analysis expertise.
+2. If the problem content is incomplete or missing, use the context and your knowledge to provide the best possible guidance.
+3. For midterm/exam questions, attempt to solve them even if explicit answers aren't provided in the materials.
 
-1. **Problem Analysis**: Clearly state what the exercise is asking for
-2. **Connection to Previous Discussion**: If relevant, reference our previous conversation
-3. **Theoretical Foundation**: Explain the relevant theory from the lecture notes
-4. **Solution Steps**: Provide step-by-step solution with mathematical reasoning
-5. **Code Implementation**: If applicable, provide Python code with explanations
-6. **Verification**: Show how to verify the solution
-7. **Learning Notes**: Highlight key concepts the student should understand
+Please provide a comprehensive response that includes:
+
+1. **Problem Analysis**: Clearly state what the problem is asking for (based on what you found or can infer)
+2. **Connection to Previous Discussion**: If relevant, reference our previous conversation  
+3. **Theoretical Foundation**: Explain the relevant numerical analysis theory
+4. **Solution Approach**: Provide your best attempt at solving the problem with mathematical reasoning
+5. **Step-by-Step Solution**: Show detailed solution steps
+6. **Code Implementation**: If applicable, provide Python code with explanations
+7. **Verification**: Show how to verify the solution
+8. **Learning Notes**: Highlight key concepts the student should understand
 
 When including mathematical expressions:
 - Use $...$ for inline math
 - Use $$...$$ for equation blocks
 
-Format your response clearly with appropriate headers and explanations suitable for learning.
+Be proactive and solution-oriented. If specific details are missing, make reasonable assumptions and explain your approach.
 """
 
         prompt = ChatPromptTemplate.from_template(template)
@@ -578,11 +603,17 @@ class ConversationalEnhancedRAGFusion:
             - Use $...$ for inline math
             - Use $$...$$ for equation blocks
 
-            If this is a follow-up question, reference relevant parts of our previous conversation.
-            However, if the question's contents are not in the retriever, please state how the information
-            cannot be found in the textbook. Say something like: "The information is not stated in the textbook,
-            so you would not be deeply required to understand it as of now."
-            """
+            IMPORTANT INSTRUCTIONS:
+            1. If the user asks to solve specific questions from a document (like "Q1-2 from midterm"), first check if you can find the actual questions in the context.
+            2. If you find the questions but not explicit answers, ATTEMPT TO SOLVE THEM using:
+               - Your knowledge of numerical analysis concepts
+               - Related information from the context
+               - Standard mathematical approaches
+            3. If you find questions in the context, DO NOT say "the information is not found" - instead, provide your best attempt at solving them.
+            4. Only if the actual questions themselves are completely missing from the context, then mention that the specific questions are not available.
+            5. If this is a follow-up question, reference relevant parts of our previous conversation.
+            
+            Provide helpful, solution-oriented responses rather than just stating limitations."""
 
         prompt = ChatPromptTemplate.from_template(template)
         
@@ -622,8 +653,114 @@ class ConversationalEnhancedRAGFusion:
         return {
             "answer": rag_fusion_answer,
             "sources": unique_sources,
-            "analysis": analysis
+            "analysis": analysis,
+            "context_docs": context_docs  # Keep for source filtering
         }
+
+class SourceRelevanceFilter:
+    """Filter and score sources based on topic relevance and query analysis."""
+    
+    def __init__(self, llm: ChatOpenAI):
+        self.llm = llm
+        
+        # Topic mapping for keyword-to-topic matching
+        self.topic_keywords = {
+            "floating_point": ["floating point", "machine epsilon", "precision", "ieee 754", "binary representation"],
+            "numerical_errors": ["error", "absolute error", "relative error", "rounding", "truncation"],
+            "linear_equations": ["linear system", "gaussian elimination", "lu decomposition", "matrix", "linear algebra"],
+            "condition_number": ["condition number", "stability", "ill-conditioned", "well-conditioned"],
+            "norms": ["norm", "vector norm", "matrix norm", "euclidean", "manhattan", "infinity norm"],
+            "nonlinear_equations": ["newton method", "newton's method", "nonlinear", "root finding", "fixed point"],
+            "iterative_methods": ["jacobi", "gauss-seidel", "conjugate gradient", "iterative"],
+            "programming": ["python", "programming", "implementation", "code", "algorithm"],
+            "introduction": ["numerical analysis", "course", "overview", "basics"],
+            "exercises": ["exercise", "problem", "homework", "solution"]
+        }
+    
+    def extract_query_topics(self, query: str, analysis: QueryAnalysis) -> List[str]:
+        """Extract relevant topics from query and analysis."""
+        query_lower = query.lower()
+        extracted_topics = []
+        
+        # Use analysis topic area if available
+        if analysis.topic_area:
+            extracted_topics.append(analysis.topic_area.lower().replace(" ", "_"))
+        
+        # Match keywords to topics
+        for topic, keywords in self.topic_keywords.items():
+            if any(keyword in query_lower for keyword in keywords):
+                extracted_topics.append(topic)
+        
+        # Extract from analysis keywords
+        for keyword in analysis.keywords:
+            keyword_lower = keyword.lower()
+            for topic, topic_keywords in self.topic_keywords.items():
+                if any(tk in keyword_lower for tk in topic_keywords):
+                    if topic not in extracted_topics:
+                        extracted_topics.append(topic)
+        
+        return list(set(extracted_topics))  # Remove duplicates
+    
+    def calculate_source_relevance_score(self, doc, query_topics: List[str]) -> float:
+        """Calculate relevance score for a document based on query topics."""
+        doc_topics_str = doc.metadata.get('topics', '')
+        doc_topics = doc_topics_str.split(',') if doc_topics_str else []
+        doc_type = doc.metadata.get('type', '')
+        source = doc.metadata.get('source', '').lower()
+        
+        if not query_topics:
+            return 0.5  # Neutral score if no topics identified
+        
+        score = 0.0
+        
+        # Direct topic match scoring
+        topic_matches = len(set(query_topics) & set(doc_topics))
+        if topic_matches > 0:
+            score += topic_matches / len(query_topics) * 0.8  # High weight for topic matches
+        
+        # Document type relevance
+        if any(qt in ['exercises', 'exercise'] for qt in query_topics):
+            if doc_type == 'exercise':
+                score += 0.3
+        elif any(qt in ['programming', 'python', 'implementation'] for qt in query_topics):
+            if 'exercise1' in source or 'python' in source:
+                score += 0.4
+        
+        # Penalize completely unrelated sources
+        if score == 0.0 and doc_topics:
+            # Check if there's any semantic overlap
+            for qt in query_topics:
+                for dt in doc_topics:
+                    if qt in dt or dt in qt:
+                        score += 0.1
+                        break
+        
+        return min(score, 1.0)  # Cap at 1.0
+    
+    def filter_sources_by_relevance(self, context_docs: List[Document], query: str, 
+                                   analysis: QueryAnalysis, threshold: float = 0.2) -> List[Document]:
+        """Filter documents by relevance score and return top relevant sources."""
+        query_topics = self.extract_query_topics(query, analysis)
+        
+        # Score all documents
+        scored_docs = []
+        for doc in context_docs:
+            score = self.calculate_source_relevance_score(doc, query_topics)
+            if score >= threshold:  # Only keep docs above threshold
+                scored_docs.append((doc, score))
+        
+        # Sort by score (descending) and return top documents
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return top 4 most relevant documents
+        filtered_docs = [doc for doc, score in scored_docs[:4]]
+        
+        # If no docs pass threshold, return top 2 from original
+        if not filtered_docs and context_docs:
+            logger.warning(f"No sources met relevance threshold {threshold}. Using top 2 sources.")
+            return context_docs[:2]
+        
+        return filtered_docs
 
 class WebSearch:
     def __init__(self, client: OpenAI):
@@ -706,6 +843,9 @@ class ConversationalAgenticRetrieval:
         # Initialize conversation manager
         self.conversation_manager = ConversationManager(self.llm)
         
+        # Initialize source relevance filter
+        self.source_filter = SourceRelevanceFilter(self.llm)
+        
         # Initialize retriever
         self.retriever = None
         self.vectorstore = None
@@ -722,7 +862,24 @@ class ConversationalAgenticRetrieval:
         structured_llm = self.llm.with_structured_output(RouteQuery)
         
         system_prompt = """You are an expert at routing a user question to the appropriate data source.
-        Based on the overall content the question is referring to, route it to the relevant data source."""
+        
+        Route to exercise_solver if the query:
+        - Asks to SOLVE specific questions from any document (like "solve Q1-2 from midterm", "how to solve midterm question 1")
+        - Asks to solve a specific exercise (like "solve Exercise 5.1")
+        - Wants step-by-step solutions for homework problems
+        - Uses action words like "solve", "calculate", "find the answer to"
+        
+        Route to local_documents if the query:
+        - Asks ABOUT midterm/exam content without requesting solutions (like "what is covered in midterm")
+        - Asks about specific content from lecture notes or course materials
+        - Wants to understand concepts from the textbook or course materials
+        - Is asking for information retrieval rather than problem solving
+        
+        Route to web_search if the query:
+        - Asks about things not covered in the course materials
+        - Requires current information from the internet
+        
+        Key distinction: Use exercise_solver for SOLVING/CALCULATING, use local_documents for FINDING/UNDERSTANDING."""
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt),
@@ -831,14 +988,36 @@ class ConversationalAgenticRetrieval:
                 if "PartI-midtermExam2024.pdf" in os.path.basename(pdf_path):
                     password = os.getenv("part1_midterm")
 
-                loader = PyPDFLoader(pdf_path, password=password)
-                documents.extend(loader.load())
+                doc = pdfium.PdfDocument(pdf_path, password=password)
+                for i, page in enumerate(doc):
+                    text_page = page.get_textpage()
+                    text = text_page.get_text_range()
+                    
+                    # Add topic tags based on PDF filename
+                    pdf_name = os.path.basename(pdf_path).lower()
+                    pdf_metadata = {
+                        "source": os.path.basename(pdf_path), 
+                        "page": i,
+                        "type": "lecture_pdf",
+                        "topics": ""
+                    }
+                    
+                    if "1st.pdf" in pdf_name:
+                        pdf_metadata["topics"] = "introduction,course_overview,numerical_analysis_basics"
+                    elif "2nd.pdf" in pdf_name:
+                        pdf_metadata["topics"] = "floating_point,numerical_errors,computer_arithmetic,error_analysis"
+                    elif "3rd.pdf" in pdf_name:
+                        pdf_metadata["topics"] = "floating_point,machine_epsilon,precision,rounding_errors"
+                    elif "4th.pdf" in pdf_name:
+                        pdf_metadata["topics"] = "exercises,ai_guidelines,academic_integrity"
+                    elif "5th.pdf" in pdf_name:
+                        pdf_metadata["topics"] = "linear_equations,gaussian_elimination,lu_decomposition,iterative_methods,linear_algebra"
+                    elif "midterm" in pdf_name:
+                        pdf_metadata["topics"] = "midterm,exam,comprehensive_review"
+                        pdf_metadata["type"] = "exam"
+                    
+                    documents.append(Document(page_content=text, metadata=pdf_metadata))
             except Exception as e:
-                if "File has not been decrypted" in str(e):
-                    logger.warning(f"Could not load encrypted PDF {pdf_path}. Make sure to set the password in your .env file.")
-                elif "Incorrect password" in str(e):
-                     logger.error(f"Incorrect password for PDF {pdf_path}.")
-                else:
                     logger.error(f"Failed to load PDF {pdf_path}: {e}")
 
         logger.info(f"Loaded {len(documents)} pages from PDF documents.")
@@ -859,15 +1038,40 @@ class ConversationalAgenticRetrieval:
                     'source': os.path.basename(notebook_path),
                     'type': 'jupyter_notebook',
                     'has_code': False,
-                    'has_math': False
+                    'has_math': False,
+                    'topics': ""  # Will be populated based on filename and content
                 }
                 
-                # Detect exercise vs lecture note
+                # Detect type and add topic tags based on filename
                 notebook_name = os.path.basename(notebook_path).lower()
                 if 'exercise' in notebook_name:
                     notebook_metadata['type'] = 'exercise'
+                    # Extract exercise number for topic mapping
+                    if 'exercise1' in notebook_name:
+                        notebook_metadata['topics'] = 'programming,python_basics,introduction'
+                    elif 'exercise2' in notebook_name:
+                        notebook_metadata['topics'] = 'floating_point,numerical_errors,error_analysis'
+                    elif 'exercise3' in notebook_name:
+                        notebook_metadata['topics'] = 'floating_point,machine_epsilon,precision'
+                    elif 'exercise4' in notebook_name:
+                        notebook_metadata['topics'] = 'norms,vector_norms,matrix_norms'
+                    elif 'exercise5' in notebook_name:
+                        notebook_metadata['topics'] = 'linear_equations,condition_number,linear_algebra'
+                    elif 'exercise6' in notebook_name:
+                        notebook_metadata['topics'] = 'linear_equations,iterative_methods'
+                    elif 'exercise7' in notebook_name:
+                        notebook_metadata['topics'] = 'nonlinear_equations,newton_method,root_finding'
                 elif 'lecture' in notebook_name:
                     notebook_metadata['type'] = 'lecture_note'
+                    # Map lecture notes to topics
+                    if '4th' in notebook_name or 'norms' in notebook_name:
+                        notebook_metadata['topics'] = 'norms,vector_norms,matrix_norms,linear_algebra'
+                    elif '5th' in notebook_name or '6th' in notebook_name or 'lineareq' in notebook_name:
+                        notebook_metadata['topics'] = 'linear_equations,condition_number,iterative_methods,conjugate_gradient,linear_algebra'
+                    elif '7th' in notebook_name or '8th' in notebook_name or 'nonlineareq' in notebook_name:
+                        notebook_metadata['topics'] = 'nonlinear_equations,newton_method,fixed_point,root_finding'
+                elif 'python_guidelines' in notebook_name:
+                    notebook_metadata['topics'] = 'programming,python_guidelines,coding_standards'
                 
                 for cell in nb.cells:
                     if cell.cell_type == 'markdown':
@@ -904,13 +1108,27 @@ class ConversationalAgenticRetrieval:
 
         logger.info(f"Total documents loaded: {len(documents)}")
 
-        # Split documents
+        # Split documents with smaller, more focused chunks for better topic precision
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            length_function=len
+            chunk_size=500,  # Smaller chunks for more focused content
+            chunk_overlap=50,  # Maintain overlap for context
+            length_function=len,
+            separators=["\n\n", "\n", ".", "!", "?", ";", " ", ""]  # Better separators
         )
         chunks = text_splitter.split_documents(documents)
+        
+        # Remove duplicate chunks
+        unique_chunks = []
+        seen_content = set()
+        for chunk in chunks:
+            # Use first 200 chars as deduplication key
+            content_key = chunk.page_content[:200].strip()
+            if content_key not in seen_content and len(content_key) > 20:  # Skip very short chunks
+                seen_content.add(content_key)
+                unique_chunks.append(chunk)
+        
+        logger.info(f"Removed {len(chunks) - len(unique_chunks)} duplicate chunks")
+        chunks = unique_chunks
         
         # Create vector store
         self.vectorstore = Chroma.from_documents(
@@ -941,13 +1159,42 @@ class ConversationalAgenticRetrieval:
             conversational_ragfusion = ConversationalEnhancedRAGFusion(
                 question, self.llm, self.query_analyzer, conversation_history
             )
-            result = conversational_ragfusion.final_rag_chain(self.retriever)
+            rag_result = conversational_ragfusion.final_rag_chain(self.retriever)
             
-            return {
-                "answer": result["answer"],
-                "sources": result["sources"],
-                "query_analysis": result.get("analysis")
-            }
+            # Apply source relevance filtering
+            if "context_docs" in rag_result and "analysis" in rag_result:
+                filtered_docs = self.source_filter.filter_sources_by_relevance(
+                    rag_result["context_docs"], 
+                    question, 
+                    rag_result["analysis"],
+                    threshold=0.2
+                )
+                
+                # Extract filtered source names
+                filtered_sources = []
+                for doc in filtered_docs:
+                    source_info = doc.metadata.get('source', 'Unknown source')
+                    if '/' in source_info:
+                        source_info = source_info.split('/')[-1]
+                    if source_info not in filtered_sources:
+                        filtered_sources.append(source_info)
+                
+                # Log filtering results for debugging
+                logger.info(f"Filtered sources from {len(rag_result['sources'])} to {len(filtered_sources)}: {filtered_sources}")
+                
+                return {
+                    "answer": rag_result["answer"],
+                    "sources": filtered_sources,
+                    "query_analysis": rag_result.get("analysis"),
+                    "source_filtering_applied": True
+                }
+            else:
+                return {
+                    "answer": rag_result["answer"],
+                    "sources": rag_result["sources"],
+                    "query_analysis": rag_result.get("analysis"),
+                    "source_filtering_applied": False
+                }
         
         elif "web_search" in datasource.lower():
             return {
