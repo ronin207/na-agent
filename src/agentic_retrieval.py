@@ -687,7 +687,10 @@ class AgenticRetrieval:
         structured_llm = self.llm.with_structured_output(RouteQuery)
         
         system_prompt = """You are an expert at routing a user question to the appropriate data source.
-        Based on the overall content the question is referring to, route it to the relevant data source."""
+If the query mentions a lecture, midterm, or any document in the course materials, route to local_documents.
+If the query asks to solve an exercise with step-by-step solutions, route to exercise_solver.
+If the query requires information from the internet, route to web_search.
+Choose one of: local_documents, exercise_solver, or web_search based on the user's intent."""
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt),
@@ -796,11 +799,11 @@ class AgenticRetrieval:
                 if "PartI-midtermExam2024.pdf" in os.path.basename(pdf_path):
                     password = os.getenv("part1_midterm")
 
-                with pdfium.PdfDocument(pdf_path, password=password) as doc:
-                    for i, page in enumerate(doc):
-                        text_page = page.get_textpage()
-                        text = text_page.get_text_range()
-                        documents.append(Document(page_content=text, metadata={"source": os.path.basename(pdf_path), "page": i}))
+                doc = pdfium.PdfDocument(pdf_path, password=password)
+                for i, page in enumerate(doc):
+                    text_page = page.get_textpage()
+                    text = text_page.get_text_range()
+                    documents.append(Document(page_content=text, metadata={"source": os.path.basename(pdf_path), "page": i}))
             except Exception as e:
                 logger.error(f"Failed to load PDF {pdf_path}: {e}")
 
