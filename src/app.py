@@ -13,7 +13,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 
 # Import after path setup
-from src.agentic_retrieval import AgenticRetrieval
+from src.conversation import ConversationalAgenticRetrieval
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 class QueryRequest(BaseModel):
     text: str
     video_url: str = None  # Optional video URL parameter
+    session_id: str = "default"  # Session ID for conversational context
 
 # Load environment variables
 env_path = os.path.join(project_root, '.env')
@@ -47,7 +48,7 @@ async def lifespan(app: FastAPI):
     global rag_pipeline
     try:
         # Initialize RAG pipeline with correct configuration
-        rag_pipeline = AgenticRetrieval(
+        rag_pipeline = ConversationalAgenticRetrieval(
             pdf_folder=os.path.join(project_root, "data"),
             persist_directory=os.path.join(project_root, "chroma_db"),
             force_rebuild=False
@@ -100,7 +101,7 @@ async def process_query(query: QueryRequest):
         
         # Process the query using the basic RAG pipeline
         logger.info(f"Processing query: {query.text}")
-        response = rag_pipeline.invoke(query.text)
+        response = rag_pipeline.invoke(query.text, query.session_id)
         
         # Format the response to match what mattermost_bot.py expects
         result = {
@@ -110,7 +111,9 @@ async def process_query(query: QueryRequest):
             "datasource": response.get('datasource', 'unknown'),
             "exercise_detected": response.get('exercise_detected', False),
             "related_lectures": response.get('related_lectures', []),
-            "query_analysis": response.get('query_analysis', {})  # Add query analysis for debugging
+            "query_analysis": response.get('query_analysis', {}),  # Add query analysis for debugging
+            "session_id": response.get('session_id', query.session_id),
+            "conversation_turns": response.get('conversation_turns', 0)
         }
         
         # Log the response
